@@ -26,9 +26,9 @@ We will use agent-sandbox.sigs.k8s.io for sandboxing. Since every project is dif
 
 ## PR ownership
 
-Since a bot is creating PR on behalf of user, we need to make sure that PR is reviewed and approved by a different user. To achieve this, the bot will use the GitHub App's installation token to perform the `git push`, but will use git config to set the `user.name` and `user.email` to the user who triggered the task, with the bot as a co-author. This guarantees GitHub records the user as the author. Because the user is the author, standard repository rules will prevent them from approving their own PR and bypassing the code review process.
+Since a bot is creating PR on behalf of user, we need to make sure that PR is reviewed and approved by a different user. To achieve this, the Controller will mint a **Scoped Agent Token** with least privilege (only allowing code push and PR creation) and provide it to the Agent sandbox. The Agent will use this scoped token to perform the `git push`, but will use git config to set the `user.name` and `user.email` to the user who triggered the task, with the bot as a co-author. This guarantees GitHub records the user as the author. Because the user is the author, standard repository rules will prevent them from approving their own PR and bypassing the code review process.
 
-Since PR is being raised for an issue, we will make the issue assignee as user who authored the PR. If there are multiple assignees, then the first assignee will be considered as an author. We will reject issues with no assignee with a message 'Please assign an issue to yourself or someone else before adding a label'.
+Since PR is being raised for an issue, the authorship of the commits will be assigned to the **Task Owner** — the user who triggered the Agent by adding the label. This ensures that the user requesting the work is held responsible for the code, and standard repository rules will prevent them from approving the resulting PR.
 
 ## Coding agents
 
