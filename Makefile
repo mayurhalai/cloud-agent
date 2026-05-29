@@ -1,10 +1,12 @@
-verify: lint build test
+all: deps fmt build lint test
+
+verify: build lint test
 
 lint:
 	@echo "Linting code..."
 	golangci-lint run
 
-build:
+build: clean
 	@echo "Building binaries..."
 	@mkdir -p bin
 	go build -o bin/webhook-listener ./cmd/webhook-listener
@@ -14,6 +16,9 @@ build:
 test:
 	@echo "Running tests..."
 	go test -v ./...
+
+deps:
+	go mod tidy
 
 fmt:
 	@echo "Formatting code..."

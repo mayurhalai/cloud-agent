@@ -98,6 +98,11 @@ func (o *Orchestrator) Reconcile(ctx context.Context, taskName string) error {
 								MountPath: "/etc/cloud-agent",
 								ReadOnly:  true,
 							},
+							{
+								Name:      "github-token-volume",
+								MountPath: "/etc/github-token",
+								ReadOnly:  true,
+							},
 						},
 					},
 				},
@@ -111,6 +116,20 @@ func (o *Orchestrator) Reconcile(ctx context.Context, taskName string) error {
 									{
 										Key:  "token",
 										Path: "callback-token",
+									},
+								},
+							},
+						},
+					},
+					{
+						Name: "github-token-volume",
+						VolumeSource: corev1.VolumeSource{
+							Secret: &corev1.SecretVolumeSource{
+								SecretName: task.Spec.GitHubTokenSecretRef,
+								Items: []corev1.KeyToPath{
+									{
+										Key:  "token",
+										Path: "github-token",
 									},
 								},
 							},

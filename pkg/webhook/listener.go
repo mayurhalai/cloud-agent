@@ -8,9 +8,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
 	"github.com/mayurhalai/cloud-agent/pkg/github"
+	yaml "gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -113,11 +115,30 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Issue 1 asks us to mint a mock GitHub token and callback token, store them in secrets, and create AgentTask CRD
+	// Webhook Listener fetches `.cloud-agent.yaml` from the repository to read the `SandboxTemplate`
+	sandboxTemplate := "default"
+	repoOwner := event.Repository.Owner.Login
+	repoName := event.Repository.Name
+	configBytes, err := s.ghClient.GetFile(repoOwner, repoName, ".cloud-agent.yaml")
+	if err == nil {
+		var config struct {
+			SandboxTemplate string `yaml:"sandboxTemplate"`
+		}
+		if err := yaml.Unmarshal(configBytes, &config); err == nil && config.SandboxTemplate != "" {
+			sandboxTemplate = config.SandboxTemplate
+		}
+	}
+
+	// Listener mints a GitHub installation token using its App private key
+	githubToken, err := s.ghClient.MintInstallationToken(repoOwner, repoName)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to mint github token: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	taskID := fmt.Sprintf("task-%d-%s", event.Issue.Number, generateRandomHex(4))
 
 	callbackToken := generateRandomHex(16)
-	githubToken := "mock-github-installation-token"
 
 	// Create Callback Token Secret
 	cbSecretName := fmt.Sprintf("%s-callback-token", taskID)
@@ -176,7 +197,7 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		},
 		Spec: v1alpha1.AgentTaskSpec{
 			Prompt:                 event.Comment.Body,
-			SandboxTemplate:        "default",
+			SandboxTemplate:        sandboxTemplate,
 			TaskOwner:              event.Comment.User.Login,
 			GitHubTokenSecretRef:   ghSecretName,
 			CallbackTokenSecretRef: cbSecretName,
@@ -238,8 +259,29 @@ func (s *ListenerServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	storedToken := string(cbSecret.Data["token"])
-	if storedToken != req.CallbackToken {
+	authHeader := r.Header.Get("Authorization")
+	var callbackToken string
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		callbackToken = strings.TrimPrefix(authHeader, "Bearer ")
+	} else if authHeader != "" {
+		callbackToken = authHeader
+	} else {
+		callbackToken = req.CallbackToken
+	}
+
+	if callbackToken == "" {
+		http.Error(w, "Missing callback token", http.StatusUnauthorized)
+		return
+	}
+
+	var storedToken string
+	if len(cbSecret.Data["token"]) > 0 {
+		storedToken = string(cbSecret.Data["token"])
+	} else {
+		storedToken = cbSecret.StringData["token"]
+	}
+
+	if storedToken != callbackToken {
 		http.Error(w, "Invalid callback token", http.StatusUnauthorized)
 		return
 	}

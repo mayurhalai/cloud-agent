@@ -50,6 +50,7 @@ func TestEndToEndHelloWorld(t *testing.T) {
 		}: "AgentTaskList",
 	})
 	mockGh := &github.MockClient{}
+	mockGh.SetFile("mayurhalai", "cloud-agent", ".cloud-agent.yaml", []byte("sandboxTemplate: custom-template"))
 
 	// 2. Set up Webhook Listener HTTP Server
 	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace)
@@ -122,6 +123,10 @@ func TestEndToEndHelloWorld(t *testing.T) {
 		t.Errorf("Expected prompt 'cloud-agent answer', got %s", task.Spec.Prompt)
 	}
 
+	if task.Spec.SandboxTemplate != "custom-template" {
+		t.Errorf("Expected sandboxTemplate 'custom-template', got %s", task.Spec.SandboxTemplate)
+	}
+
 	// 6. Wait until the Orchestrator detects the task and provisions a Pod
 	podName := fmt.Sprintf("sandbox-%s", task.Name)
 	var pod *corev1.Pod
@@ -134,8 +139,23 @@ func TestEndToEndHelloWorld(t *testing.T) {
 	}
 
 	// Verify the Volume mount config
-	if len(pod.Spec.Volumes) != 1 || pod.Spec.Volumes[0].Name != "callback-token-volume" {
-		t.Errorf("Unexpected Pod volumes: %+v", pod.Spec.Volumes)
+	if len(pod.Spec.Volumes) != 2 {
+		t.Errorf("Expected 2 Pod volumes, got %d: %+v", len(pod.Spec.Volumes), pod.Spec.Volumes)
+	}
+	var callbackVolumeFound, githubVolumeFound bool
+	for _, vol := range pod.Spec.Volumes {
+		if vol.Name == "callback-token-volume" {
+			callbackVolumeFound = true
+		}
+		if vol.Name == "github-token-volume" {
+			githubVolumeFound = true
+		}
+	}
+	if !callbackVolumeFound {
+		t.Errorf("Missing callback-token-volume in Pod Spec")
+	}
+	if !githubVolumeFound {
+		t.Errorf("Missing github-token-volume in Pod Spec")
 	}
 
 	// Verify task state transitioned to Running
@@ -158,7 +178,12 @@ func TestEndToEndHelloWorld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to retrieve callback secret: %v", err)
 	}
-	token := string(secret.Data["token"])
+	var token string
+	if len(secret.Data["token"]) > 0 {
+		token = string(secret.Data["token"])
+	} else {
+		token = secret.StringData["token"]
+	}
 
 	// Write token to a temporary file (to simulate secret volume mount in pod)
 	tmpDir, err := os.MkdirTemp("", "sandbox-secret")
@@ -236,4 +261,130 @@ func pollUntil(ctx context.Context, interval time.Duration, cond func() bool) er
 			}
 		}
 	}
+}
+
+func TestCallbackEndpointAuthentication(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	namespace := "default"
+	scheme := runtime.NewScheme()
+
+	fakeK8s := kubernetesfake.NewSimpleClientset()
+	fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
+		schema.GroupVersionResource{
+			Group:    "cloudagent.mayurhalai.github.com",
+			Version:  "v1alpha1",
+			Resource: "agenttasks",
+		}: "AgentTaskList",
+	})
+	mockGh := &github.MockClient{}
+
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace)
+	server := httptest.NewServer(listener)
+	defer server.Close()
+
+	// 1. Create a dummy AgentTask and Secrets directly to test callback API
+	taskID := "test-callback-task"
+	callbackToken := "super-secret-token"
+
+	cbSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cb-secret",
+			Namespace: namespace,
+		},
+		StringData: map[string]string{
+			"token": callbackToken,
+		},
+	}
+	_, err := fakeK8s.CoreV1().Secrets(namespace).Create(ctx, cbSecret, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Failed to create callback secret: %v", err)
+	}
+
+	agentTask := &v1alpha1.AgentTask{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "cloudagent.mayurhalai.github.com/v1alpha1",
+			Kind:       "AgentTask",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskID,
+			Namespace: namespace,
+			Annotations: map[string]string{
+				"cloudagent.mayurhalai.github.com/issue-number": "123",
+				"cloudagent.mayurhalai.github.com/repo-owner":   "mayurhalai",
+				"cloudagent.mayurhalai.github.com/repo-name":    "cloud-agent",
+			},
+		},
+		Spec: v1alpha1.AgentTaskSpec{
+			Prompt:                 "test prompt",
+			SandboxTemplate:        "default",
+			GitHubTokenSecretRef:   "dummy-gh-secret",
+			CallbackTokenSecretRef: "test-cb-secret",
+		},
+	}
+	uTask, err := v1alpha1.ToUnstructured(agentTask)
+	if err != nil {
+		t.Fatalf("Failed to serialize AgentTask: %v", err)
+	}
+	_, err = fakeDyn.Resource(agentTaskGVR).Namespace(namespace).Create(ctx, uTask, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Failed to create AgentTask: %v", err)
+	}
+
+	// 2. Try callback with no Authorization header -> Should reject
+	reqPayload := map[string]string{
+		"taskName": taskID,
+		"response": "Success",
+	}
+	bodyBytes, _ := json.Marshal(reqPayload)
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/callback", bytes.NewBuffer(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("Expected status 401 for missing token, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	// 3. Try callback with invalid Authorization header -> Should reject
+	req, _ = http.NewRequest(http.MethodPost, server.URL+"/callback", bytes.NewBuffer(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("Expected status 401 for invalid token, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	// 4. Try callback with correct token in header -> Should succeed
+	req, _ = http.NewRequest(http.MethodPost, server.URL+"/callback", bytes.NewBuffer(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+callbackToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200 for correct token, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	// 5. Subsequent callback with same token -> Should reject (already invalidated)
+	req, _ = http.NewRequest(http.MethodPost, server.URL+"/callback", bytes.NewBuffer(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+callbackToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("Expected status 401 for already invalidated token, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
 }

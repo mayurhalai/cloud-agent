@@ -42,9 +42,8 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	// Construct request body
 	payload := map[string]string{
-		"taskName":      r.taskName,
-		"callbackToken": token,
-		"response":      "Hello World",
+		"taskName": r.taskName,
+		"response": "Hello World",
 	}
 
 	payloadBytes, err := json.Marshal(payload)
@@ -58,6 +57,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to create callback request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
