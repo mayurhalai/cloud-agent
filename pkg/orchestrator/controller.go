@@ -8,12 +8,12 @@ import (
 	"strings"
 
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	agentsandbox "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 )
 
 var agentTaskGVR = schema.GroupVersionResource{
@@ -26,6 +26,7 @@ type Orchestrator struct {
 	k8sClient kubernetes.Interface
 	dynClient dynamic.Interface
 	namespace string
+	K8sHelper *agentsandbox.K8sHelper
 }
 
 func NewOrchestrator(k8sClient kubernetes.Interface, dynClient dynamic.Interface, namespace string) *Orchestrator {
@@ -55,133 +56,126 @@ func (o *Orchestrator) Reconcile(ctx context.Context, taskName string) error {
 
 	switch state {
 	case v1alpha1.StatePending:
-		// Check if Pod already exists
-		podName := fmt.Sprintf("sandbox-%s", task.Name)
-		_, err := o.k8sClient.CoreV1().Pods(o.namespace).Get(ctx, podName, metav1.GetOptions{})
-		if err == nil {
-			// Pod already exists, update state to Running
-			return o.updateTaskState(ctx, task, v1alpha1.StateRunning)
+		// Transition task to StateRunning immediately
+		if err := o.updateTaskState(ctx, task, v1alpha1.StateRunning); err != nil {
+			return fmt.Errorf("failed to update task state to Running: %v", err)
 		}
 
-		// Create sandbox Pod
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      podName,
-				Namespace: o.namespace,
-				Labels: map[string]string{
-					"cloudagent.mayurhalai.github.com/task-id": task.Name,
-					"app": "cloud-agent-sandbox",
-				},
-			},
-			Spec: corev1.PodSpec{
-				RestartPolicy: corev1.RestartPolicyNever,
-				Containers: []corev1.Container{
-					{
-						Name:  "sandbox",
-						Image: "cloud-agent-sandbox:latest",
-						Env: []corev1.EnvVar{
-							{
-								Name:  "TASK_NAME",
-								Value: task.Name,
-							},
-							{
-								Name:  "PROMPT",
-								Value: task.Spec.Prompt,
-							},
-							{
-								Name:  "TASK_OWNER",
-								Value: task.Spec.TaskOwner,
-							},
-							{
-								Name:  "TASK_OWNER_EMAIL",
-								Value: task.Spec.TaskOwnerEmail,
-							},
-							{
-								Name:  "REPO_OWNER",
-								Value: task.Annotations["cloudagent.mayurhalai.github.com/repo-owner"],
-							},
-							{
-								Name:  "REPO_NAME",
-								Value: task.Annotations["cloudagent.mayurhalai.github.com/repo-name"],
-							},
-							{
-								Name:  "TASK_TYPE",
-								Value: task.Annotations["cloudagent.mayurhalai.github.com/task-type"],
-							},
-							{
-								Name:  "AGENT_BINARY",
-								Value: getEnvWithDefault("AGENT_BINARY", "opencode"),
-							},
-						},
-						VolumeMounts: []corev1.VolumeMount{
-							{
-								Name:      "callback-token-volume",
-								MountPath: "/etc/cloud-agent",
-								ReadOnly:  true,
-							},
-							{
-								Name:      "github-token-volume",
-								MountPath: "/etc/github-token",
-								ReadOnly:  true,
-							},
-						},
-					},
-				},
-				Volumes: []corev1.Volume{
-					{
-						Name: "callback-token-volume",
-						VolumeSource: corev1.VolumeSource{
-							Secret: &corev1.SecretVolumeSource{
-								SecretName: task.Spec.CallbackTokenSecretRef,
-								Items: []corev1.KeyToPath{
-									{
-										Key:  "token",
-										Path: "callback-token",
-									},
-								},
-							},
-						},
-					},
-					{
-						Name: "github-token-volume",
-						VolumeSource: corev1.VolumeSource{
-							Secret: &corev1.SecretVolumeSource{
-								SecretName: task.Spec.GitHubTokenSecretRef,
-								Items: []corev1.KeyToPath{
-									{
-										Key:  "token",
-										Path: "github-token",
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-
-		_, err = o.k8sClient.CoreV1().Pods(o.namespace).Create(ctx, pod, metav1.CreateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to create sandbox Pod: %v", err)
-		}
-
-		return o.updateTaskState(ctx, task, v1alpha1.StateRunning)
+		// Spawn background goroutine to execute task
+		go o.executeTask(task)
+		return nil
 
 	case v1alpha1.StateCompleted:
-		// Delete Pod
-		podName := fmt.Sprintf("sandbox-%s", task.Name)
-		err := o.k8sClient.CoreV1().Pods(o.namespace).Delete(ctx, podName, metav1.DeleteOptions{})
-		if err != nil {
-			// If Pod not found, that is fine
-			if !strings.Contains(err.Error(), "not found") {
-				return fmt.Errorf("failed to delete sandbox Pod: %v", err)
-			}
-		}
 		// Mark state as Deleted
 		return o.updateTaskState(ctx, task, v1alpha1.StateDeleted)
 	}
 
 	return nil
+}
+
+func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
+	ctx := context.Background()
+	log.Printf("Starting execution for task %s", task.Name)
+
+	opts := agentsandbox.Options{
+		TemplateName: task.Spec.SandboxTemplate,
+		Namespace:    o.namespace,
+	}
+	if o.K8sHelper != nil {
+		opts.K8sHelper = o.K8sHelper
+	}
+	if testAPIURL := os.Getenv("TEST_SANDBOX_API_URL"); testAPIURL != "" {
+		opts.APIURL = testAPIURL
+	}
+
+	sb, err := agentsandbox.New(ctx, opts)
+	if err != nil {
+		log.Printf("Failed to create Sandbox instance for task %s: %v", task.Name, err)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+
+	if err := sb.Open(ctx); err != nil {
+		log.Printf("Failed to open Sandbox for task %s: %v", task.Name, err)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+	defer func() {
+		if err := sb.Close(ctx); err != nil {
+			log.Printf("Failed to close Sandbox for task %s: %v", task.Name, err)
+		}
+	}()
+
+	// Fetch callback token and github token from Secrets
+	cbSecret, err := o.k8sClient.CoreV1().Secrets(o.namespace).Get(ctx, task.Spec.CallbackTokenSecretRef, metav1.GetOptions{})
+	if err != nil {
+		log.Printf("Failed to get callback token secret for task %s: %v", task.Name, err)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+	callbackToken := string(cbSecret.Data["token"])
+	if callbackToken == "" {
+		callbackToken = cbSecret.StringData["token"]
+	}
+
+	ghSecret, err := o.k8sClient.CoreV1().Secrets(o.namespace).Get(ctx, task.Spec.GitHubTokenSecretRef, metav1.GetOptions{})
+	if err != nil {
+		log.Printf("Failed to get github token secret for task %s: %v", task.Name, err)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+	githubToken := string(ghSecret.Data["token"])
+	if githubToken == "" {
+		githubToken = ghSecret.StringData["token"]
+	}
+
+	// Write tokens to the sandbox
+	if err := sb.Write(ctx, "callback-token", []byte(callbackToken)); err != nil {
+		log.Printf("Failed to write callback token inside sandbox for task %s: %v", task.Name, err)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+	if err := sb.Write(ctx, "github-token", []byte(githubToken)); err != nil {
+		log.Printf("Failed to write github token inside sandbox for task %s: %v", task.Name, err)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+
+	// Run sandbox-server inside the sandbox
+	cmdStr := fmt.Sprintf("TASK_NAME=%s CALLBACK_URL=%s CALLBACK_TOKEN_PATH=%s GITHUB_TOKEN_PATH=%s REPO_OWNER=%s REPO_NAME=%s TASK_OWNER=%s TASK_OWNER_EMAIL=%s TASK_TYPE=%s AGENT_BINARY=%s PROMPT=%s sandbox-server",
+		escapeShellArg(task.Name),
+		escapeShellArg(getEnvWithDefault("CALLBACK_URL", "http://webhook-listener/callback")),
+		escapeShellArg("callback-token"),
+		escapeShellArg("github-token"),
+		escapeShellArg(task.Annotations["cloudagent.mayurhalai.github.com/repo-owner"]),
+		escapeShellArg(task.Annotations["cloudagent.mayurhalai.github.com/repo-name"]),
+		escapeShellArg(task.Spec.TaskOwner),
+		escapeShellArg(task.Spec.TaskOwnerEmail),
+		escapeShellArg(task.Annotations["cloudagent.mayurhalai.github.com/task-type"]),
+		escapeShellArg(getEnvWithDefault("AGENT_BINARY", "opencode")),
+		escapeShellArg(task.Spec.Prompt),
+	)
+
+	log.Printf("Executing sandbox-server inside sandbox for task %s", task.Name)
+	res, err := sb.Run(ctx, cmdStr)
+	if err != nil {
+		log.Printf("Failed to run sandbox-server for task %s: %v", task.Name, err)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+
+	if res.ExitCode != 0 {
+		log.Printf("sandbox-server for task %s exited with code %d. Stderr: %s", task.Name, res.ExitCode, res.Stderr)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+
+	log.Printf("Task %s completed successfully in sandbox", task.Name)
+	_ = o.updateTaskState(ctx, task, v1alpha1.StateDeleted)
+}
+
+func escapeShellArg(arg string) string {
+	return "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
 }
 
 func (o *Orchestrator) updateTaskState(ctx context.Context, task *v1alpha1.AgentTask, state v1alpha1.AgentTaskState) error {

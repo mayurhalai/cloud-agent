@@ -5,27 +5,38 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
 	"github.com/mayurhalai/cloud-agent/pkg/github"
 	"github.com/mayurhalai/cloud-agent/pkg/orchestrator"
-	"github.com/mayurhalai/cloud-agent/pkg/sandbox"
 	"github.com/mayurhalai/cloud-agent/pkg/webhook"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
+	clientgotesting "k8s.io/client-go/testing"
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sdk "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+	agentsfake "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
+	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1alpha1"
+	extensionsfake "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/fake"
+	extensionsclientv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1alpha1"
+	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
 var agentTaskGVR = schema.GroupVersionResource{
@@ -43,23 +54,188 @@ func TestEndToEndHelloWorld(t *testing.T) {
 
 	// 1. Instantiate fake clients and mock github client
 	fakeK8s := kubernetesfake.NewSimpleClientset()
+	fakeAgentsCS := agentsfake.NewSimpleClientset() //nolint:staticcheck
+	var createdClaims []*extensionsv1alpha1.SandboxClaim
+	var claimsMu sync.Mutex
+
+	fakeExtensionsCS := extensionsfake.NewSimpleClientset() //nolint:staticcheck
+	fakeExtensionsCS.PrependReactor("create", "sandboxclaims", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
+		createAction := action.(clientgotesting.CreateAction)
+		claim := createAction.GetObject().(*extensionsv1alpha1.SandboxClaim)
+		if claim.Name == "" && claim.GenerateName != "" {
+			claim.Name = claim.GenerateName + "abcde"
+		}
+		claimsMu.Lock()
+		createdClaims = append(createdClaims, claim)
+		claimsMu.Unlock()
+		return false, nil, nil
+	})
+
 	fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
 		schema.GroupVersionResource{
 			Group:    "cloudagent.mayurhalai.github.com",
 			Version:  "v1alpha1",
 			Resource: "agenttasks",
 		}: "AgentTaskList",
+		schema.GroupVersionResource{
+			Group:    "extensions.agents.x-k8s.io",
+			Version:  "v1alpha1",
+			Resource: "sandboxclaims",
+		}: "SandboxClaimList",
 	})
 	mockGh := &github.MockClient{}
 	mockGh.SetFile("mayurhalai", "cloud-agent", ".cloud-agent.yaml", []byte("sandboxTemplate: custom-template"))
+
+	// Start fake sandbox controller
+	startFakeSandboxController(ctx, fakeAgentsCS.AgentsV1alpha1(), fakeExtensionsCS.ExtensionsV1alpha1(), namespace)
+
+	// Create temp directories
+	tmpDir, err := os.MkdirTemp("", "sandbox-secret")
+	if err != nil {
+		t.Fatalf("Failed to create tmp dir: %v", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(tmpDir)
+	}()
+
+	srcDir, err := os.MkdirTemp("", "git-src")
+	if err != nil {
+		t.Fatalf("Failed to create src temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(srcDir)
+	}()
+
+	runCmd := func(dir string, name string, args ...string) {
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to run %s %v: %v", name, args, err)
+		}
+	}
+
+	runCmd(srcDir, "git", "init")
+	runCmd(srcDir, "git", "config", "user.name", "Test Src")
+	runCmd(srcDir, "git", "config", "user.email", "src@example.com")
+
+	dummyFile := filepath.Join(srcDir, "README.md")
+	_ = os.WriteFile(dummyFile, []byte("Hello Remote"), 0644)
+	runCmd(srcDir, "git", "add", "README.md")
+	runCmd(srcDir, "git", "commit", "-m", "Initial commit")
+	runCmd(srcDir, "git", "config", "receive.denyCurrentBranch", "ignore")
+
+	t.Setenv("GIT_REMOTE_URL", srcDir)
+	t.Setenv("WORKSPACE_DIR", filepath.Join(tmpDir, "workspace"))
+
+	mockAgentScript := `#!/bin/sh
+if [ "$TASK_TYPE" = "pr" ]; then
+  echo "Attribution verification" > pr-test.txt
+  git add pr-test.txt
+  git commit -m "Agent commit"
+  git push origin HEAD
+  echo "https://github.com/mayurhalai/cloud-agent/pull/42"
+else
+  echo "Mock Agent Response"
+fi
+`
+	agentPath := filepath.Join(tmpDir, "mock-agent")
+	if err := os.WriteFile(agentPath, []byte(mockAgentScript), 0755); err != nil {
+		t.Fatalf("Failed to write mock agent script: %v", err)
+	}
+	t.Setenv("AGENT_BINARY", agentPath)
+
+	// Set up mock Sandbox runtime HTTP server
+	mockSandboxServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/upload" {
+			err := r.ParseMultipartForm(10 << 20)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			file, header, err := r.FormFile("file")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			defer func() { _ = file.Close() }()
+
+			outPath := filepath.Join(tmpDir, header.Filename)
+			outFile, err := os.Create(outPath)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer func() { _ = outFile.Close() }()
+			_, _ = io.Copy(outFile, file)
+
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if r.URL.Path == "/execute" {
+			var req struct {
+				Command string `json:"command"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			absBinPath, _ := filepath.Abs("../bin")
+			pathEnv := fmt.Sprintf("PATH=%s:%s", absBinPath, os.Getenv("PATH"))
+
+			cmd := exec.Command("sh", "-c", req.Command)
+			cmd.Dir = tmpDir
+			cmd.Env = append(os.Environ(), pathEnv)
+
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			exitCode := 0
+			if err := cmd.Run(); err != nil {
+				if exitError, ok := err.(*exec.ExitError); ok {
+					exitCode = exitError.ExitCode()
+				} else {
+					exitCode = 1
+				}
+			}
+
+			resp := map[string]interface{}{
+				"stdout":    stdout.String(),
+				"stderr":    stderr.String(),
+				"exit_code": exitCode,
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		http.Error(w, "Not found", http.StatusNotFound)
+	}))
+	defer mockSandboxServer.Close()
+
+	t.Setenv("TEST_SANDBOX_API_URL", mockSandboxServer.URL)
 
 	// 2. Set up Webhook Listener HTTP Server
 	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace)
 	server := httptest.NewServer(listener)
 	defer server.Close()
 
+	t.Setenv("CALLBACK_URL", server.URL+"/callback")
+
 	// 3. Start Orchestrator watch loop
 	orch := orchestrator.NewOrchestrator(fakeK8s, fakeDyn, namespace)
+	orch.K8sHelper = &sdk.K8sHelper{
+		AgentsClient:     fakeAgentsCS.AgentsV1alpha1(),
+		ExtensionsClient: fakeExtensionsCS.ExtensionsV1alpha1(),
+		DynamicClient:    fakeDyn,
+		CoreClient:       fakeK8s.CoreV1(),
+		Log: funcr.New(func(prefix, args string) {
+			t.Logf("[SDK] %s: %s", prefix, args)
+		}, funcr.Options{}),
+	}
+
 	go func() {
 		if err := orch.Start(ctx); err != nil && ctx.Err() == nil {
 			t.Errorf("Orchestrator error: %v", err)
@@ -133,194 +309,37 @@ func TestEndToEndHelloWorld(t *testing.T) {
 		t.Errorf("Expected sandboxTemplate 'custom-template', got %s", task.Spec.SandboxTemplate)
 	}
 
-	// 6. Wait until the Orchestrator detects the task and provisions a Pod
-	podName := fmt.Sprintf("sandbox-%s", task.Name)
-	var pod *corev1.Pod
+	// 6. Verify SandboxClaim was created
+	var claim *extensionsv1alpha1.SandboxClaim
 	err = pollUntil(ctx, 100*time.Millisecond, func() bool {
-		pod, err = fakeK8s.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
-		return err == nil
+		claimsMu.Lock()
+		defer claimsMu.Unlock()
+		if len(createdClaims) == 1 {
+			claim = createdClaims[0]
+			return true
+		}
+		return false
 	})
 	if err != nil {
-		t.Fatalf("Pod was not created by orchestrator in time: %v", err)
+		t.Fatalf("SandboxClaim not created in time: %v", err)
 	}
 
-	// Verify Pod environment variables
-	var foundOwnerEmail, foundRepoOwner, foundRepoName bool
-	for _, env := range pod.Spec.Containers[0].Env {
-		if env.Name == "TASK_OWNER_EMAIL" && env.Value == "123456+test-owner-user@users.noreply.github.com" {
-			foundOwnerEmail = true
-		}
-		if env.Name == "REPO_OWNER" && env.Value == "mayurhalai" {
-			foundRepoOwner = true
-		}
-		if env.Name == "REPO_NAME" && env.Value == "cloud-agent" {
-			foundRepoName = true
-		}
-	}
-	if !foundOwnerEmail {
-		t.Errorf("TASK_OWNER_EMAIL environment variable not found or incorrect on Pod")
-	}
-	if !foundRepoOwner {
-		t.Errorf("REPO_OWNER environment variable not found or incorrect on Pod")
-	}
-	if !foundRepoName {
-		t.Errorf("REPO_NAME environment variable not found or incorrect on Pod")
+	if claim.Spec.TemplateRef.Name != "custom-template" {
+		t.Errorf("Expected SandboxClaim templateRef name 'custom-template', got %s", claim.Spec.TemplateRef.Name)
 	}
 
-	// Verify the Volume mount config
-	if len(pod.Spec.Volumes) != 2 {
-		t.Errorf("Expected 2 Pod volumes, got %d: %+v", len(pod.Spec.Volumes), pod.Spec.Volumes)
-	}
-	var callbackVolumeFound, githubVolumeFound bool
-	for _, vol := range pod.Spec.Volumes {
-		if vol.Name == "callback-token-volume" {
-			callbackVolumeFound = true
-		}
-		if vol.Name == "github-token-volume" {
-			githubVolumeFound = true
-		}
-	}
-	if !callbackVolumeFound {
-		t.Errorf("Missing callback-token-volume in Pod Spec")
-	}
-	if !githubVolumeFound {
-		t.Errorf("Missing github-token-volume in Pod Spec")
-	}
-
-	// Verify task state transitioned to Running
-	var updatedTaskObj *unstructured.Unstructured
-	err = pollUntil(ctx, 100*time.Millisecond, func() bool {
-		updatedTaskObj, err = fakeDyn.Resource(agentTaskGVR).Namespace(namespace).Get(ctx, task.Name, metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		updatedTask, _ := v1alpha1.FromUnstructured(updatedTaskObj)
-		return updatedTask.Status.State == v1alpha1.StateRunning
-	})
-	if err != nil {
-		t.Fatalf("Task did not transition to Running state in time: %v", err)
-	}
-
-	// 7. Simulating Sandbox Server Execution
-	// Read the minted callback token from the created Secret
-	secret, err := fakeK8s.CoreV1().Secrets(namespace).Get(ctx, task.Spec.CallbackTokenSecretRef, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Failed to retrieve callback secret: %v", err)
-	}
-	var token string
-	if len(secret.Data["token"]) > 0 {
-		token = string(secret.Data["token"])
-	} else {
-		token = secret.StringData["token"]
-	}
-
-	// Write token to a temporary file (to simulate secret volume mount in pod)
-	tmpDir, err := os.MkdirTemp("", "sandbox-secret")
-	if err != nil {
-		t.Fatalf("Failed to create tmp dir: %v", err)
-	}
-	defer func() {
-		_ = os.RemoveAll(tmpDir)
-	}()
-
-	tokenFile := filepath.Join(tmpDir, "callback-token")
-	if err := os.WriteFile(tokenFile, []byte(token), 0644); err != nil {
-		t.Fatalf("Failed to write token file: %v", err)
-	}
-
-	// Create a local git repository to act as target remote
-	srcDir, err := os.MkdirTemp("", "git-src")
-	if err != nil {
-		t.Fatalf("Failed to create src temp dir: %v", err)
-	}
-	defer func() {
-		_ = os.RemoveAll(srcDir)
-	}()
-
-	runCmd := func(dir string, name string, args ...string) {
-		cmd := exec.Command(name, args...)
-		cmd.Dir = dir
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("Failed to run %s %v: %v", name, args, err)
-		}
-	}
-
-	runCmd(srcDir, "git", "init")
-	runCmd(srcDir, "git", "config", "user.name", "Test Src")
-	runCmd(srcDir, "git", "config", "user.email", "src@example.com")
-
-	dummyFile := filepath.Join(srcDir, "README.md")
-	_ = os.WriteFile(dummyFile, []byte("Hello Remote"), 0644)
-	runCmd(srcDir, "git", "add", "README.md")
-	runCmd(srcDir, "git", "commit", "-m", "Initial commit")
-	runCmd(srcDir, "git", "config", "receive.denyCurrentBranch", "ignore")
-
-	t.Setenv("GIT_REMOTE_URL", srcDir)
-
-	// Set up temporary workspace directory for cloning
-	workspaceTempDir, err := os.MkdirTemp("", "sandbox-workspace")
-	if err != nil {
-		t.Fatalf("Failed to create workspace temp dir: %v", err)
-	}
-	defer func() {
-		_ = os.RemoveAll(workspaceTempDir)
-	}()
-
-	// Write dummy github token
-	githubTokenFile := filepath.Join(tmpDir, "github-token")
-	if err := os.WriteFile(githubTokenFile, []byte("dummy-gh-token"), 0644); err != nil {
-		t.Fatalf("Failed to write github token: %v", err)
-	}
-
-	// Write mock agent script
-	mockAgentScript := `#!/bin/sh
-if [ "$TASK_TYPE" = "pr" ]; then
-  echo "Attribution verification" > pr-test.txt
-  git add pr-test.txt
-  git commit -m "Agent commit"
-  git push origin HEAD
-  echo "https://github.com/mayurhalai/cloud-agent/pull/42"
-else
-  echo "Mock Agent Response"
-fi
-`
-	agentPath := filepath.Join(tmpDir, "mock-agent")
-	if err := os.WriteFile(agentPath, []byte(mockAgentScript), 0755); err != nil {
-		t.Fatalf("Failed to write mock agent script: %v", err)
-	}
-
-	// Start Sandbox Runner pointing to local server callback
-	runner := sandbox.NewRunner(
-		task.Name,
-		server.URL+"/callback",
-		tokenFile,
-		githubTokenFile,
-		"mayurhalai",
-		"cloud-agent",
-		task.Spec.TaskOwner,
-		task.Spec.TaskOwnerEmail,
-		workspaceTempDir,
-		"comment",
-		agentPath,
-		task.Spec.Prompt,
-		nil,
-	)
-	if err := runner.Run(ctx); err != nil {
-		t.Fatalf("Sandbox runner returned error: %v", err)
-	}
-
-	// 8. Verify the Callback completed successfully
+	// 7. Verify the Callback completed successfully
 	// - comment was posted
+	err = pollUntil(ctx, 100*time.Millisecond, func() bool {
+		return len(mockGh.GetComments()) == 1
+	})
+	if err != nil {
+		t.Fatalf("Comment not posted on GitHub: %v", err)
+	}
+
 	comments := mockGh.GetComments()
-	if len(comments) != 1 {
-		t.Errorf("Expected 1 comment on GitHub, got %d", len(comments))
-	} else {
-		if comments[0].Body != "Mock Agent Response" {
-			t.Errorf("Expected comment body 'Mock Agent Response', got '%s'", comments[0].Body)
-		}
-		if comments[0].IssueNumber != 1 {
-			t.Errorf("Expected issue 1, got %d", comments[0].IssueNumber)
-		}
+	if comments[0].Body != "Mock Agent Response" {
+		t.Errorf("Expected comment body 'Mock Agent Response', got '%s'", comments[0].Body)
 	}
 
 	// - callback token secret was deleted (invalidated)
@@ -329,16 +348,7 @@ fi
 		t.Errorf("Expected callback token secret to be deleted/invalidated")
 	}
 
-	// 9. Verify Orchestrator cleanup deletes the Pod
-	err = pollUntil(ctx, 100*time.Millisecond, func() bool {
-		_, err = fakeK8s.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
-		return err != nil && strings.Contains(err.Error(), "not found")
-	})
-	if err != nil {
-		t.Fatalf("Pod was not deleted by orchestrator in time: %v", err)
-	}
-
-	// Verify the final task status transitioned to Deleted
+	// 8. Verify the final task status transitioned to Deleted
 	err = pollUntil(ctx, 100*time.Millisecond, func() bool {
 		finalTaskObj, err := fakeDyn.Resource(agentTaskGVR).Namespace(namespace).Get(ctx, task.Name, metav1.GetOptions{})
 		if err != nil {
@@ -349,6 +359,15 @@ fi
 	})
 	if err != nil {
 		t.Fatalf("Task did not transition to Deleted state in time: %v", err)
+	}
+
+	// 9. Verify the SandboxClaim was deleted (Closed)
+	err = pollUntil(ctx, 100*time.Millisecond, func() bool {
+		claims, err := fakeExtensionsCS.ExtensionsV1alpha1().SandboxClaims(namespace).List(ctx, metav1.ListOptions{})
+		return err == nil && len(claims.Items) == 0
+	})
+	if err != nil {
+		t.Fatalf("SandboxClaim was not deleted: %v", err)
 	}
 }
 
@@ -502,23 +521,184 @@ func TestEndToEndPRTask(t *testing.T) {
 
 	// 1. Instantiate fake clients and mock github client
 	fakeK8s := kubernetesfake.NewSimpleClientset()
+	fakeAgentsCS := agentsfake.NewSimpleClientset() //nolint:staticcheck
+	var createdClaimsPR []*extensionsv1alpha1.SandboxClaim
+	var claimsMuPR sync.Mutex
+
+	fakeExtensionsCS := extensionsfake.NewSimpleClientset() //nolint:staticcheck
+	fakeExtensionsCS.PrependReactor("create", "sandboxclaims", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
+		createAction := action.(clientgotesting.CreateAction)
+		claim := createAction.GetObject().(*extensionsv1alpha1.SandboxClaim)
+		if claim.Name == "" && claim.GenerateName != "" {
+			claim.Name = claim.GenerateName + "abcde"
+		}
+		claimsMuPR.Lock()
+		createdClaimsPR = append(createdClaimsPR, claim)
+		claimsMuPR.Unlock()
+		return false, nil, nil
+	})
+
 	fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
 		schema.GroupVersionResource{
 			Group:    "cloudagent.mayurhalai.github.com",
 			Version:  "v1alpha1",
 			Resource: "agenttasks",
 		}: "AgentTaskList",
+		schema.GroupVersionResource{
+			Group:    "extensions.agents.x-k8s.io",
+			Version:  "v1alpha1",
+			Resource: "sandboxclaims",
+		}: "SandboxClaimList",
 	})
 	mockGh := &github.MockClient{}
 	mockGh.SetFile("mayurhalai", "cloud-agent", ".cloud-agent.yaml", []byte("sandboxTemplate: custom-template"))
+
+	// Start fake sandbox controller
+	startFakeSandboxController(ctx, fakeAgentsCS.AgentsV1alpha1(), fakeExtensionsCS.ExtensionsV1alpha1(), namespace)
+
+	// Create temp directories
+	tmpDir, err := os.MkdirTemp("", "sandbox-secret-pr")
+	if err != nil {
+		t.Fatalf("Failed to create tmp dir: %v", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(tmpDir)
+	}()
+
+	srcDir, err := os.MkdirTemp("", "git-src-pr")
+	if err != nil {
+		t.Fatalf("Failed to create src temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(srcDir)
+	}()
+
+	runCmd := func(dir string, name string, args ...string) {
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to run %s %v: %v", name, args, err)
+		}
+	}
+
+	runCmd(srcDir, "git", "init")
+	runCmd(srcDir, "git", "config", "user.name", "Test Src")
+	runCmd(srcDir, "git", "config", "user.email", "src@example.com")
+
+	dummyFile := filepath.Join(srcDir, "README.md")
+	_ = os.WriteFile(dummyFile, []byte("Hello Remote"), 0644)
+	runCmd(srcDir, "git", "add", "README.md")
+	runCmd(srcDir, "git", "commit", "-m", "Initial commit")
+	runCmd(srcDir, "git", "config", "receive.denyCurrentBranch", "ignore")
+
+	t.Setenv("GIT_REMOTE_URL", srcDir)
+	t.Setenv("WORKSPACE_DIR", filepath.Join(tmpDir, "workspace"))
+
+	mockAgentScript := `#!/bin/sh
+echo "attribution-verified" > attribution-test.txt
+git add attribution-test.txt > /dev/null 2>&1
+git commit -m "Verify git attribution for test-owner-user" > /dev/null 2>&1
+git push origin HEAD > /dev/null 2>&1
+echo "https://github.com/mayurhalai/cloud-agent/pull/42"
+`
+	agentPath := filepath.Join(tmpDir, "mock-agent")
+	if err := os.WriteFile(agentPath, []byte(mockAgentScript), 0755); err != nil {
+		t.Fatalf("Failed to write mock agent script: %v", err)
+	}
+	t.Setenv("AGENT_BINARY", agentPath)
+
+	// Set up mock Sandbox runtime HTTP server
+	mockSandboxServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/upload" {
+			err := r.ParseMultipartForm(10 << 20)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			file, header, err := r.FormFile("file")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			defer func() { _ = file.Close() }()
+
+			outPath := filepath.Join(tmpDir, header.Filename)
+			outFile, err := os.Create(outPath)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer func() { _ = outFile.Close() }()
+			_, _ = io.Copy(outFile, file)
+
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if r.URL.Path == "/execute" {
+			var req struct {
+				Command string `json:"command"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			absBinPath, _ := filepath.Abs("../bin")
+			pathEnv := fmt.Sprintf("PATH=%s:%s", absBinPath, os.Getenv("PATH"))
+
+			cmd := exec.Command("sh", "-c", req.Command)
+			cmd.Dir = tmpDir
+			cmd.Env = append(os.Environ(), pathEnv)
+
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			exitCode := 0
+			if err := cmd.Run(); err != nil {
+				if exitError, ok := err.(*exec.ExitError); ok {
+					exitCode = exitError.ExitCode()
+				} else {
+					exitCode = 1
+				}
+			}
+
+			resp := map[string]interface{}{
+				"stdout":    stdout.String(),
+				"stderr":    stderr.String(),
+				"exit_code": exitCode,
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		http.Error(w, "Not found", http.StatusNotFound)
+	}))
+	defer mockSandboxServer.Close()
+
+	t.Setenv("TEST_SANDBOX_API_URL", mockSandboxServer.URL)
 
 	// 2. Set up Webhook Listener HTTP Server
 	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace)
 	server := httptest.NewServer(listener)
 	defer server.Close()
 
+	t.Setenv("CALLBACK_URL", server.URL+"/callback")
+
 	// 3. Start Orchestrator watch loop
 	orch := orchestrator.NewOrchestrator(fakeK8s, fakeDyn, namespace)
+	orch.K8sHelper = &sdk.K8sHelper{
+		AgentsClient:     fakeAgentsCS.AgentsV1alpha1(),
+		ExtensionsClient: fakeExtensionsCS.ExtensionsV1alpha1(),
+		DynamicClient:    fakeDyn,
+		CoreClient:       fakeK8s.CoreV1(),
+		Log: funcr.New(func(prefix, args string) {
+			t.Logf("[SDK] %s: %s", prefix, args)
+		}, funcr.Options{}),
+	}
+
 	go func() {
 		if err := orch.Start(ctx); err != nil && ctx.Err() == nil {
 			t.Errorf("Orchestrator error: %v", err)
@@ -585,118 +765,40 @@ func TestEndToEndPRTask(t *testing.T) {
 		t.Errorf("Expected task type annotation 'pr', got '%s'", task.Annotations["cloudagent.mayurhalai.github.com/task-type"])
 	}
 
-	// Wait until orchestrator provisions Pod
-	podName := fmt.Sprintf("sandbox-%s", task.Name)
+	// 6. Verify SandboxClaim was created
+	var claim *extensionsv1alpha1.SandboxClaim
 	err = pollUntil(ctx, 100*time.Millisecond, func() bool {
-		_, err := fakeK8s.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
-		return err == nil
+		claimsMuPR.Lock()
+		defer claimsMuPR.Unlock()
+		if len(createdClaimsPR) == 1 {
+			claim = createdClaimsPR[0]
+			return true
+		}
+		return false
 	})
 	if err != nil {
-		t.Fatalf("Pod was not created in time: %v", err)
+		t.Fatalf("SandboxClaim not created in time: %v", err)
 	}
 
-	// Retrieve secret/token
-	secret, err := fakeK8s.CoreV1().Secrets(namespace).Get(ctx, task.Spec.CallbackTokenSecretRef, metav1.GetOptions{})
+	if claim.Spec.TemplateRef.Name != "custom-template" {
+		t.Errorf("Expected SandboxClaim templateRef name 'custom-template', got %s", claim.Spec.TemplateRef.Name)
+	}
+
+	// 7. Verify the Callback reported the PR link
+	err = pollUntil(ctx, 100*time.Millisecond, func() bool {
+		return len(mockGh.GetComments()) == 1
+	})
 	if err != nil {
-		t.Fatalf("Failed to retrieve callback secret: %v", err)
-	}
-	var token string
-	if len(secret.Data["token"]) > 0 {
-		token = string(secret.Data["token"])
-	} else {
-		token = secret.StringData["token"]
+		t.Fatalf("PR link comment not posted on GitHub: %v", err)
 	}
 
-	tmpDir, err := os.MkdirTemp("", "sandbox-secret-pr")
-	if err != nil {
-		t.Fatalf("Failed to create tmp dir: %v", err)
-	}
-	defer func() {
-		_ = os.RemoveAll(tmpDir)
-	}()
-
-	tokenFile := filepath.Join(tmpDir, "callback-token")
-	if err := os.WriteFile(tokenFile, []byte(token), 0644); err != nil {
-		t.Fatalf("Failed to write token file: %v", err)
+	comments := mockGh.GetComments()
+	if comments[0].Body != "https://github.com/mayurhalai/cloud-agent/pull/42" {
+		t.Errorf("Expected comment body 'https://github.com/mayurhalai/cloud-agent/pull/42', got '%s'", comments[0].Body)
 	}
 
-	// Create local target remote git repository
-	srcDir, err := os.MkdirTemp("", "git-src-pr")
-	if err != nil {
-		t.Fatalf("Failed to create src temp dir: %v", err)
-	}
-	defer func() {
-		_ = os.RemoveAll(srcDir)
-	}()
-
-	runCmd := func(dir string, name string, args ...string) {
-		cmd := exec.Command(name, args...)
-		cmd.Dir = dir
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("Failed to run %s %v: %v", name, args, err)
-		}
-	}
-
-	runCmd(srcDir, "git", "init")
-	runCmd(srcDir, "git", "config", "user.name", "Test Src")
-	runCmd(srcDir, "git", "config", "user.email", "src@example.com")
-
-	dummyFile := filepath.Join(srcDir, "README.md")
-	_ = os.WriteFile(dummyFile, []byte("Hello Remote"), 0644)
-	runCmd(srcDir, "git", "add", "README.md")
-	runCmd(srcDir, "git", "commit", "-m", "Initial commit")
-	runCmd(srcDir, "git", "config", "receive.denyCurrentBranch", "ignore")
-
-	t.Setenv("GIT_REMOTE_URL", srcDir)
-
-	// Set up temporary workspace directory for cloning
-	workspaceTempDir, err := os.MkdirTemp("", "sandbox-workspace-pr")
-	if err != nil {
-		t.Fatalf("Failed to create workspace temp dir: %v", err)
-	}
-	defer func() {
-		_ = os.RemoveAll(workspaceTempDir)
-	}()
-
-	githubTokenFile := filepath.Join(tmpDir, "github-token")
-	if err := os.WriteFile(githubTokenFile, []byte("dummy-gh-token"), 0644); err != nil {
-		t.Fatalf("Failed to write github token: %v", err)
-	}
-
-	// Write mock agent script that performs a commit and pushes it
-	mockAgentScript := `#!/bin/sh
-echo "attribution-verified" > attribution-test.txt
-git add attribution-test.txt > /dev/null 2>&1
-git commit -m "Verify git attribution for test-owner-user" > /dev/null 2>&1
-git push origin HEAD > /dev/null 2>&1
-echo "https://github.com/mayurhalai/cloud-agent/pull/42"
-`
-	agentPath := filepath.Join(tmpDir, "mock-agent")
-	if err := os.WriteFile(agentPath, []byte(mockAgentScript), 0755); err != nil {
-		t.Fatalf("Failed to write mock agent script: %v", err)
-	}
-
-	// Start Sandbox Runner pointing to local server callback
-	runner := sandbox.NewRunner(
-		task.Name,
-		server.URL+"/callback",
-		tokenFile,
-		githubTokenFile,
-		"mayurhalai",
-		"cloud-agent",
-		task.Spec.TaskOwner,
-		task.Spec.TaskOwnerEmail,
-		workspaceTempDir,
-		"pr",
-		agentPath,
-		task.Spec.Prompt,
-		nil,
-	)
-	if err := runner.Run(ctx); err != nil {
-		t.Fatalf("Sandbox runner returned error: %v", err)
-	}
-
-	// Verify commit logs
+	// Verify commit logs in the workspace directory!
+	workspaceTempDir := filepath.Join(tmpDir, "workspace")
 	cmdLog := exec.Command("git", "log", "-1", "--format=%an|%ae")
 	cmdLog.Dir = workspaceTempDir
 	logOut, err := cmdLog.Output()
@@ -707,16 +809,6 @@ echo "https://github.com/mayurhalai/cloud-agent/pull/42"
 	expectedAuthor := fmt.Sprintf("%s|%s", task.Spec.TaskOwner, task.Spec.TaskOwnerEmail)
 	if logStr != expectedAuthor {
 		t.Errorf("Expected commit author %q, got %q", expectedAuthor, logStr)
-	}
-
-	// Verify the Callback reported the PR link
-	comments := mockGh.GetComments()
-	if len(comments) != 1 {
-		t.Errorf("Expected 1 comment on GitHub, got %d", len(comments))
-	} else {
-		if comments[0].Body != "https://github.com/mayurhalai/cloud-agent/pull/42" {
-			t.Errorf("Expected comment body 'https://github.com/mayurhalai/cloud-agent/pull/42', got '%s'", comments[0].Body)
-		}
 	}
 }
 
@@ -804,4 +896,67 @@ func TestLabelOnPRRejected(t *testing.T) {
 	if comments[0].IssueNumber != 100 {
 		t.Errorf("Expected comment on issue/PR 100, got %d", comments[0].IssueNumber)
 	}
+}
+
+func startFakeSandboxController(ctx context.Context, agentsClient agentsv1alpha1.AgentsV1alpha1Interface, extensionsClient extensionsclientv1alpha1.ExtensionsV1alpha1Interface, namespace string) {
+	go func() {
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				claims, err := extensionsClient.SandboxClaims(namespace).List(ctx, metav1.ListOptions{})
+				if err != nil {
+					continue
+				}
+				for _, claim := range claims.Items {
+					if claim.Status.SandboxStatus.Name == "" {
+						claim.Status.SandboxStatus.Name = "mock-sandbox-" + claim.Name
+						_, _ = extensionsClient.SandboxClaims(namespace).UpdateStatus(ctx, &claim, metav1.UpdateOptions{})
+					}
+					sbName := claim.Status.SandboxStatus.Name
+					if sbName != "" {
+						_, err := agentsClient.Sandboxes(namespace).Get(ctx, sbName, metav1.GetOptions{})
+						if err != nil && k8serrors.IsNotFound(err) {
+							sb := &sandboxv1alpha1.Sandbox{
+								ObjectMeta: metav1.ObjectMeta{
+									Name:      sbName,
+									Namespace: namespace,
+									Annotations: map[string]string{
+										sdk.PodNameAnnotation: "pod-" + sbName,
+									},
+								},
+							}
+							_, _ = agentsClient.Sandboxes(namespace).Create(ctx, sb, metav1.CreateOptions{})
+						}
+					}
+				}
+
+				sandboxes, err := agentsClient.Sandboxes(namespace).List(ctx, metav1.ListOptions{})
+				if err != nil {
+					continue
+				}
+				for _, sb := range sandboxes.Items {
+					isReady := false
+					for _, cond := range sb.Status.Conditions {
+						if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
+							isReady = true
+							break
+						}
+					}
+					if !isReady {
+						sb.Status.Conditions = []metav1.Condition{
+							{
+								Type:   string(sandboxv1alpha1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						}
+						_, _ = agentsClient.Sandboxes(namespace).UpdateStatus(ctx, &sb, metav1.UpdateOptions{})
+					}
+				}
+			}
+		}
+	}()
 }
