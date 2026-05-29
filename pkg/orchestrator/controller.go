@@ -91,6 +91,18 @@ func (o *Orchestrator) Reconcile(ctx context.Context, taskName string) error {
 								Name:  "TASK_OWNER",
 								Value: task.Spec.TaskOwner,
 							},
+							{
+								Name:  "TASK_OWNER_EMAIL",
+								Value: task.Spec.TaskOwnerEmail,
+							},
+							{
+								Name:  "REPO_OWNER",
+								Value: task.Annotations["cloudagent.mayurhalai.github.com/repo-owner"],
+							},
+							{
+								Name:  "REPO_NAME",
+								Value: task.Annotations["cloudagent.mayurhalai.github.com/repo-name"],
+							},
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{

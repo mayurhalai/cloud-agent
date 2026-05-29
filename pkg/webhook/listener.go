@@ -52,6 +52,7 @@ type GitHubIssueCommentEvent struct {
 		Body string `json:"body"`
 		User struct {
 			Login string `json:"login"`
+			ID    int64  `json:"id"`
 		} `json:"user"`
 	} `json:"comment"`
 	Repository struct {
@@ -199,6 +200,7 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			Prompt:                 event.Comment.Body,
 			SandboxTemplate:        sandboxTemplate,
 			TaskOwner:              event.Comment.User.Login,
+			TaskOwnerEmail:         fmt.Sprintf("%d+%s@users.noreply.github.com", event.Comment.User.ID, event.Comment.User.Login),
 			GitHubTokenSecretRef:   ghSecretName,
 			CallbackTokenSecretRef: cbSecretName,
 		},

@@ -20,6 +20,7 @@ type AgentTaskSpec struct {
 	Prompt                 string `json:"prompt,omitempty"`
 	SandboxTemplate        string `json:"sandboxTemplate,omitempty"`
 	TaskOwner              string `json:"taskOwner,omitempty"`
+	TaskOwnerEmail         string `json:"taskOwnerEmail,omitempty"`
 	GitHubTokenSecretRef   string `json:"githubTokenSecretRef,omitempty"`
 	CallbackTokenSecretRef string `json:"callbackTokenSecretRef,omitempty"`
 }

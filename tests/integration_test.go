@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -76,6 +77,7 @@ func TestEndToEndHelloWorld(t *testing.T) {
 			"body": "cloud-agent answer",
 			"user": map[string]interface{}{
 				"login": "test-owner-user",
+				"id":    123456,
 			},
 		},
 		"repository": map[string]interface{}{
@@ -123,6 +125,10 @@ func TestEndToEndHelloWorld(t *testing.T) {
 		t.Errorf("Expected prompt 'cloud-agent answer', got %s", task.Spec.Prompt)
 	}
 
+	if task.Spec.TaskOwnerEmail != "123456+test-owner-user@users.noreply.github.com" {
+		t.Errorf("Expected TaskOwnerEmail '123456+test-owner-user@users.noreply.github.com', got %s", task.Spec.TaskOwnerEmail)
+	}
+
 	if task.Spec.SandboxTemplate != "custom-template" {
 		t.Errorf("Expected sandboxTemplate 'custom-template', got %s", task.Spec.SandboxTemplate)
 	}
@@ -136,6 +142,29 @@ func TestEndToEndHelloWorld(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Pod was not created by orchestrator in time: %v", err)
+	}
+
+	// Verify Pod environment variables
+	var foundOwnerEmail, foundRepoOwner, foundRepoName bool
+	for _, env := range pod.Spec.Containers[0].Env {
+		if env.Name == "TASK_OWNER_EMAIL" && env.Value == "123456+test-owner-user@users.noreply.github.com" {
+			foundOwnerEmail = true
+		}
+		if env.Name == "REPO_OWNER" && env.Value == "mayurhalai" {
+			foundRepoOwner = true
+		}
+		if env.Name == "REPO_NAME" && env.Value == "cloud-agent" {
+			foundRepoName = true
+		}
+	}
+	if !foundOwnerEmail {
+		t.Errorf("TASK_OWNER_EMAIL environment variable not found or incorrect on Pod")
+	}
+	if !foundRepoOwner {
+		t.Errorf("REPO_OWNER environment variable not found or incorrect on Pod")
+	}
+	if !foundRepoName {
+		t.Errorf("REPO_NAME environment variable not found or incorrect on Pod")
 	}
 
 	// Verify the Volume mount config
@@ -199,10 +228,78 @@ func TestEndToEndHelloWorld(t *testing.T) {
 		t.Fatalf("Failed to write token file: %v", err)
 	}
 
+	// Create a local git repository to act as target remote
+	srcDir, err := os.MkdirTemp("", "git-src")
+	if err != nil {
+		t.Fatalf("Failed to create src temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(srcDir)
+	}()
+
+	runCmd := func(dir string, name string, args ...string) {
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to run %s %v: %v", name, args, err)
+		}
+	}
+
+	runCmd(srcDir, "git", "init")
+	runCmd(srcDir, "git", "config", "user.name", "Test Src")
+	runCmd(srcDir, "git", "config", "user.email", "src@example.com")
+
+	dummyFile := filepath.Join(srcDir, "README.md")
+	_ = os.WriteFile(dummyFile, []byte("Hello Remote"), 0644)
+	runCmd(srcDir, "git", "add", "README.md")
+	runCmd(srcDir, "git", "commit", "-m", "Initial commit")
+	runCmd(srcDir, "git", "config", "receive.denyCurrentBranch", "ignore")
+
+	t.Setenv("GIT_REMOTE_URL", srcDir)
+
+	// Set up temporary workspace directory for cloning
+	workspaceTempDir, err := os.MkdirTemp("", "sandbox-workspace")
+	if err != nil {
+		t.Fatalf("Failed to create workspace temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(workspaceTempDir)
+	}()
+
+	// Write dummy github token
+	githubTokenFile := filepath.Join(tmpDir, "github-token")
+	if err := os.WriteFile(githubTokenFile, []byte("dummy-gh-token"), 0644); err != nil {
+		t.Fatalf("Failed to write github token: %v", err)
+	}
+
 	// Start Sandbox Runner pointing to local server callback
-	runner := sandbox.NewRunner(task.Name, server.URL+"/callback", tokenFile, nil)
+	runner := sandbox.NewRunner(
+		task.Name,
+		server.URL+"/callback",
+		tokenFile,
+		githubTokenFile,
+		"mayurhalai",
+		"cloud-agent",
+		task.Spec.TaskOwner,
+		task.Spec.TaskOwnerEmail,
+		workspaceTempDir,
+		nil,
+	)
 	if err := runner.Run(ctx); err != nil {
 		t.Fatalf("Sandbox runner returned error: %v", err)
+	}
+
+	// Verify the dummy commit author and email inside workspaceTempDir
+	cmdLog := exec.Command("git", "log", "-1", "--format=%an|%ae")
+	cmdLog.Dir = workspaceTempDir
+	logOut, err := cmdLog.Output()
+	if err != nil {
+		t.Fatalf("Failed to run git log: %v", err)
+	}
+	logStr := strings.TrimSpace(string(logOut))
+	expectedAuthor := fmt.Sprintf("%s|%s", task.Spec.TaskOwner, task.Spec.TaskOwnerEmail)
+	if logStr != expectedAuthor {
+		t.Errorf("Expected commit author %q, got %q", expectedAuthor, logStr)
 	}
 
 	// 8. Verify the Callback completed successfully
