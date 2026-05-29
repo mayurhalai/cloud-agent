@@ -1,0 +1,229 @@
+package orchestrator
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+
+	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	agentsandbox "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+)
+
+var agentTaskGVR = schema.GroupVersionResource{
+	Group:    "cloudagent.mayurhalai.github.com",
+	Version:  "v1alpha1",
+	Resource: "agenttasks",
+}
+
+type Orchestrator struct {
+	k8sClient kubernetes.Interface
+	dynClient dynamic.Interface
+	namespace string
+	K8sHelper *agentsandbox.K8sHelper
+}
+
+func NewOrchestrator(k8sClient kubernetes.Interface, dynClient dynamic.Interface, namespace string) *Orchestrator {
+	return &Orchestrator{
+		k8sClient: k8sClient,
+		dynClient: dynClient,
+		namespace: namespace,
+	}
+}
+
+// Reconcile performs a single synchronization step for the given task.
+func (o *Orchestrator) Reconcile(ctx context.Context, taskName string) error {
+	uTask, err := o.dynClient.Resource(agentTaskGVR).Namespace(o.namespace).Get(ctx, taskName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get AgentTask: %v", err)
+	}
+
+	task, err := v1alpha1.FromUnstructured(uTask)
+	if err != nil {
+		return fmt.Errorf("failed to parse AgentTask: %v", err)
+	}
+
+	state := task.Status.State
+	if state == "" {
+		state = v1alpha1.StatePending
+	}
+
+	switch state {
+	case v1alpha1.StatePending:
+		// Transition task to StateRunning immediately
+		if err := o.updateTaskState(ctx, task, v1alpha1.StateRunning); err != nil {
+			return fmt.Errorf("failed to update task state to Running: %v", err)
+		}
+
+		// Spawn background goroutine to execute task
+		go o.executeTask(task)
+		return nil
+
+	case v1alpha1.StateCompleted:
+		// Mark state as Deleted
+		return o.updateTaskState(ctx, task, v1alpha1.StateDeleted)
+	}
+
+	return nil
+}
+
+func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
+	ctx := context.Background()
+	log.Printf("Starting execution for task %s", task.Name)
+
+	opts := agentsandbox.Options{
+		TemplateName: task.Spec.SandboxTemplate,
+		Namespace:    o.namespace,
+	}
+	if o.K8sHelper != nil {
+		opts.K8sHelper = o.K8sHelper
+	}
+	if testAPIURL := os.Getenv("TEST_SANDBOX_API_URL"); testAPIURL != "" {
+		opts.APIURL = testAPIURL
+	}
+
+	sb, err := agentsandbox.New(ctx, opts)
+	if err != nil {
+		log.Printf("Failed to create Sandbox instance for task %s: %v", task.Name, err)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+
+	if err := sb.Open(ctx); err != nil {
+		log.Printf("Failed to open Sandbox for task %s: %v", task.Name, err)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+	defer func() {
+		if err := sb.Close(ctx); err != nil {
+			log.Printf("Failed to close Sandbox for task %s: %v", task.Name, err)
+		}
+	}()
+
+	// Fetch callback token and github token from Secrets
+	cbSecret, err := o.k8sClient.CoreV1().Secrets(o.namespace).Get(ctx, task.Spec.CallbackTokenSecretRef, metav1.GetOptions{})
+	if err != nil {
+		log.Printf("Failed to get callback token secret for task %s: %v", task.Name, err)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+	callbackToken := string(cbSecret.Data["token"])
+	if callbackToken == "" {
+		callbackToken = cbSecret.StringData["token"]
+	}
+
+	ghSecret, err := o.k8sClient.CoreV1().Secrets(o.namespace).Get(ctx, task.Spec.GitHubTokenSecretRef, metav1.GetOptions{})
+	if err != nil {
+		log.Printf("Failed to get github token secret for task %s: %v", task.Name, err)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+	githubToken := string(ghSecret.Data["token"])
+	if githubToken == "" {
+		githubToken = ghSecret.StringData["token"]
+	}
+
+	// Write tokens to the sandbox
+	if err := sb.Write(ctx, "callback-token", []byte(callbackToken)); err != nil {
+		log.Printf("Failed to write callback token inside sandbox for task %s: %v", task.Name, err)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+	if err := sb.Write(ctx, "github-token", []byte(githubToken)); err != nil {
+		log.Printf("Failed to write github token inside sandbox for task %s: %v", task.Name, err)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+
+	// Run sandbox-server inside the sandbox
+	cmdStr := fmt.Sprintf("TASK_NAME=%s CALLBACK_URL=%s CALLBACK_TOKEN_PATH=%s GITHUB_TOKEN_PATH=%s REPO_OWNER=%s REPO_NAME=%s TASK_OWNER=%s TASK_OWNER_EMAIL=%s TASK_TYPE=%s AGENT_BINARY=%s PROMPT=%s sandbox-server",
+		escapeShellArg(task.Name),
+		escapeShellArg(getEnvWithDefault("CALLBACK_URL", "http://webhook-listener/callback")),
+		escapeShellArg("callback-token"),
+		escapeShellArg("github-token"),
+		escapeShellArg(task.Annotations["cloudagent.mayurhalai.github.com/repo-owner"]),
+		escapeShellArg(task.Annotations["cloudagent.mayurhalai.github.com/repo-name"]),
+		escapeShellArg(task.Spec.TaskOwner),
+		escapeShellArg(task.Spec.TaskOwnerEmail),
+		escapeShellArg(task.Annotations["cloudagent.mayurhalai.github.com/task-type"]),
+		escapeShellArg(getEnvWithDefault("AGENT_BINARY", "opencode")),
+		escapeShellArg(task.Spec.Prompt),
+	)
+
+	log.Printf("Executing sandbox-server inside sandbox for task %s", task.Name)
+	res, err := sb.Run(ctx, cmdStr)
+	if err != nil {
+		log.Printf("Failed to run sandbox-server for task %s: %v", task.Name, err)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+
+	if res.ExitCode != 0 {
+		log.Printf("sandbox-server for task %s exited with code %d. Stderr: %s", task.Name, res.ExitCode, res.Stderr)
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
+	}
+
+	log.Printf("Task %s completed successfully in sandbox", task.Name)
+	_ = o.updateTaskState(ctx, task, v1alpha1.StateDeleted)
+}
+
+func escapeShellArg(arg string) string {
+	return "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
+}
+
+func (o *Orchestrator) updateTaskState(ctx context.Context, task *v1alpha1.AgentTask, state v1alpha1.AgentTaskState) error {
+	task.Status.State = state
+	uTask, err := v1alpha1.ToUnstructured(task)
+	if err != nil {
+		return err
+	}
+	_, err = o.dynClient.Resource(agentTaskGVR).Namespace(o.namespace).UpdateStatus(ctx, uTask, metav1.UpdateOptions{})
+	if err != nil {
+		_, err = o.dynClient.Resource(agentTaskGVR).Namespace(o.namespace).Update(ctx, uTask, metav1.UpdateOptions{})
+	}
+	return err
+}
+
+// Start starts the orchestrator controller loop watching for AgentTasks
+func (o *Orchestrator) Start(ctx context.Context) error {
+	watcher, err := o.dynClient.Resource(agentTaskGVR).Namespace(o.namespace).Watch(ctx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	defer watcher.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case event, ok := <-watcher.ResultChan():
+			if !ok {
+				return fmt.Errorf("watch channel closed")
+			}
+			if event.Type == "ADDED" || event.Type == "MODIFIED" {
+				uObj, ok := event.Object.(*unstructured.Unstructured)
+				if !ok {
+					continue
+				}
+				taskName := uObj.GetName()
+				if err := o.Reconcile(ctx, taskName); err != nil {
+					log.Printf("Reconcile error for %s: %v", taskName, err)
+				}
+			}
+		}
+	}
+}
+
+func getEnvWithDefault(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
+}
