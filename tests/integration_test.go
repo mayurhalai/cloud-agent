@@ -272,6 +272,23 @@ func TestEndToEndHelloWorld(t *testing.T) {
 		t.Fatalf("Failed to write github token: %v", err)
 	}
 
+	// Write mock agent script
+	mockAgentScript := `#!/bin/sh
+if [ "$TASK_TYPE" = "pr" ]; then
+  echo "Attribution verification" > pr-test.txt
+  git add pr-test.txt
+  git commit -m "Agent commit"
+  git push origin HEAD
+  echo "https://github.com/mayurhalai/cloud-agent/pull/42"
+else
+  echo "Mock Agent Response"
+fi
+`
+	agentPath := filepath.Join(tmpDir, "mock-agent")
+	if err := os.WriteFile(agentPath, []byte(mockAgentScript), 0755); err != nil {
+		t.Fatalf("Failed to write mock agent script: %v", err)
+	}
+
 	// Start Sandbox Runner pointing to local server callback
 	runner := sandbox.NewRunner(
 		task.Name,
@@ -283,23 +300,13 @@ func TestEndToEndHelloWorld(t *testing.T) {
 		task.Spec.TaskOwner,
 		task.Spec.TaskOwnerEmail,
 		workspaceTempDir,
+		"comment",
+		agentPath,
+		task.Spec.Prompt,
 		nil,
 	)
 	if err := runner.Run(ctx); err != nil {
 		t.Fatalf("Sandbox runner returned error: %v", err)
-	}
-
-	// Verify the dummy commit author and email inside workspaceTempDir
-	cmdLog := exec.Command("git", "log", "-1", "--format=%an|%ae")
-	cmdLog.Dir = workspaceTempDir
-	logOut, err := cmdLog.Output()
-	if err != nil {
-		t.Fatalf("Failed to run git log: %v", err)
-	}
-	logStr := strings.TrimSpace(string(logOut))
-	expectedAuthor := fmt.Sprintf("%s|%s", task.Spec.TaskOwner, task.Spec.TaskOwnerEmail)
-	if logStr != expectedAuthor {
-		t.Errorf("Expected commit author %q, got %q", expectedAuthor, logStr)
 	}
 
 	// 8. Verify the Callback completed successfully
@@ -308,8 +315,8 @@ func TestEndToEndHelloWorld(t *testing.T) {
 	if len(comments) != 1 {
 		t.Errorf("Expected 1 comment on GitHub, got %d", len(comments))
 	} else {
-		if comments[0].Body != "Hello World" {
-			t.Errorf("Expected comment body 'Hello World', got '%s'", comments[0].Body)
+		if comments[0].Body != "Mock Agent Response" {
+			t.Errorf("Expected comment body 'Mock Agent Response', got '%s'", comments[0].Body)
 		}
 		if comments[0].IssueNumber != 1 {
 			t.Errorf("Expected issue 1, got %d", comments[0].IssueNumber)
@@ -484,4 +491,317 @@ func TestCallbackEndpointAuthentication(t *testing.T) {
 		t.Errorf("Expected status 401 for already invalidated token, got %d", resp.StatusCode)
 	}
 	_ = resp.Body.Close()
+}
+
+func TestEndToEndPRTask(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	namespace := "default"
+	scheme := runtime.NewScheme()
+
+	// 1. Instantiate fake clients and mock github client
+	fakeK8s := kubernetesfake.NewSimpleClientset()
+	fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
+		schema.GroupVersionResource{
+			Group:    "cloudagent.mayurhalai.github.com",
+			Version:  "v1alpha1",
+			Resource: "agenttasks",
+		}: "AgentTaskList",
+	})
+	mockGh := &github.MockClient{}
+	mockGh.SetFile("mayurhalai", "cloud-agent", ".cloud-agent.yaml", []byte("sandboxTemplate: custom-template"))
+
+	// 2. Set up Webhook Listener HTTP Server
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace)
+	server := httptest.NewServer(listener)
+	defer server.Close()
+
+	// 3. Start Orchestrator watch loop
+	orch := orchestrator.NewOrchestrator(fakeK8s, fakeDyn, namespace)
+	go func() {
+		if err := orch.Start(ctx); err != nil && ctx.Err() == nil {
+			t.Errorf("Orchestrator error: %v", err)
+		}
+	}()
+
+	// 4. Send GitHub issue label webhook event to /webhook
+	payload := map[string]interface{}{
+		"action": "labeled",
+		"issue": map[string]interface{}{
+			"number": 1,
+			"title":  "Fix bug",
+			"body":   "Fix this issue",
+		},
+		"label": map[string]interface{}{
+			"name": "cloud-agent",
+		},
+		"sender": map[string]interface{}{
+			"login": "test-owner-user",
+			"id":    123456,
+		},
+		"repository": map[string]interface{}{
+			"name": "cloud-agent",
+			"owner": map[string]interface{}{
+				"login": "mayurhalai",
+			},
+		},
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Failed to marshal webhook payload: %v", err)
+	}
+
+	resp, err := http.Post(server.URL+"/webhook", "application/json", bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		t.Fatalf("Failed to POST webhook: %v", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("Expected status code 201, got %d", resp.StatusCode)
+	}
+
+	// 5. Verify the AgentTask CRD was created
+	var list *unstructured.UnstructuredList
+	err = pollUntil(ctx, 100*time.Millisecond, func() bool {
+		list, err = fakeDyn.Resource(agentTaskGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+		return err == nil && len(list.Items) == 1
+	})
+	if err != nil {
+		t.Fatalf("AgentTask not created in time: %v", err)
+	}
+
+	taskObj := list.Items[0]
+	task, err := v1alpha1.FromUnstructured(&taskObj)
+	if err != nil {
+		t.Fatalf("Failed to parse AgentTask: %v", err)
+	}
+
+	if task.Annotations["cloudagent.mayurhalai.github.com/task-type"] != "pr" {
+		t.Errorf("Expected task type annotation 'pr', got '%s'", task.Annotations["cloudagent.mayurhalai.github.com/task-type"])
+	}
+
+	// Wait until orchestrator provisions Pod
+	podName := fmt.Sprintf("sandbox-%s", task.Name)
+	err = pollUntil(ctx, 100*time.Millisecond, func() bool {
+		_, err := fakeK8s.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+		return err == nil
+	})
+	if err != nil {
+		t.Fatalf("Pod was not created in time: %v", err)
+	}
+
+	// Retrieve secret/token
+	secret, err := fakeK8s.CoreV1().Secrets(namespace).Get(ctx, task.Spec.CallbackTokenSecretRef, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to retrieve callback secret: %v", err)
+	}
+	var token string
+	if len(secret.Data["token"]) > 0 {
+		token = string(secret.Data["token"])
+	} else {
+		token = secret.StringData["token"]
+	}
+
+	tmpDir, err := os.MkdirTemp("", "sandbox-secret-pr")
+	if err != nil {
+		t.Fatalf("Failed to create tmp dir: %v", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(tmpDir)
+	}()
+
+	tokenFile := filepath.Join(tmpDir, "callback-token")
+	if err := os.WriteFile(tokenFile, []byte(token), 0644); err != nil {
+		t.Fatalf("Failed to write token file: %v", err)
+	}
+
+	// Create local target remote git repository
+	srcDir, err := os.MkdirTemp("", "git-src-pr")
+	if err != nil {
+		t.Fatalf("Failed to create src temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(srcDir)
+	}()
+
+	runCmd := func(dir string, name string, args ...string) {
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to run %s %v: %v", name, args, err)
+		}
+	}
+
+	runCmd(srcDir, "git", "init")
+	runCmd(srcDir, "git", "config", "user.name", "Test Src")
+	runCmd(srcDir, "git", "config", "user.email", "src@example.com")
+
+	dummyFile := filepath.Join(srcDir, "README.md")
+	_ = os.WriteFile(dummyFile, []byte("Hello Remote"), 0644)
+	runCmd(srcDir, "git", "add", "README.md")
+	runCmd(srcDir, "git", "commit", "-m", "Initial commit")
+	runCmd(srcDir, "git", "config", "receive.denyCurrentBranch", "ignore")
+
+	t.Setenv("GIT_REMOTE_URL", srcDir)
+
+	// Set up temporary workspace directory for cloning
+	workspaceTempDir, err := os.MkdirTemp("", "sandbox-workspace-pr")
+	if err != nil {
+		t.Fatalf("Failed to create workspace temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(workspaceTempDir)
+	}()
+
+	githubTokenFile := filepath.Join(tmpDir, "github-token")
+	if err := os.WriteFile(githubTokenFile, []byte("dummy-gh-token"), 0644); err != nil {
+		t.Fatalf("Failed to write github token: %v", err)
+	}
+
+	// Write mock agent script that performs a commit and pushes it
+	mockAgentScript := `#!/bin/sh
+echo "attribution-verified" > attribution-test.txt
+git add attribution-test.txt > /dev/null 2>&1
+git commit -m "Verify git attribution for test-owner-user" > /dev/null 2>&1
+git push origin HEAD > /dev/null 2>&1
+echo "https://github.com/mayurhalai/cloud-agent/pull/42"
+`
+	agentPath := filepath.Join(tmpDir, "mock-agent")
+	if err := os.WriteFile(agentPath, []byte(mockAgentScript), 0755); err != nil {
+		t.Fatalf("Failed to write mock agent script: %v", err)
+	}
+
+	// Start Sandbox Runner pointing to local server callback
+	runner := sandbox.NewRunner(
+		task.Name,
+		server.URL+"/callback",
+		tokenFile,
+		githubTokenFile,
+		"mayurhalai",
+		"cloud-agent",
+		task.Spec.TaskOwner,
+		task.Spec.TaskOwnerEmail,
+		workspaceTempDir,
+		"pr",
+		agentPath,
+		task.Spec.Prompt,
+		nil,
+	)
+	if err := runner.Run(ctx); err != nil {
+		t.Fatalf("Sandbox runner returned error: %v", err)
+	}
+
+	// Verify commit logs
+	cmdLog := exec.Command("git", "log", "-1", "--format=%an|%ae")
+	cmdLog.Dir = workspaceTempDir
+	logOut, err := cmdLog.Output()
+	if err != nil {
+		t.Fatalf("Failed to run git log: %v", err)
+	}
+	logStr := strings.TrimSpace(string(logOut))
+	expectedAuthor := fmt.Sprintf("%s|%s", task.Spec.TaskOwner, task.Spec.TaskOwnerEmail)
+	if logStr != expectedAuthor {
+		t.Errorf("Expected commit author %q, got %q", expectedAuthor, logStr)
+	}
+
+	// Verify the Callback reported the PR link
+	comments := mockGh.GetComments()
+	if len(comments) != 1 {
+		t.Errorf("Expected 1 comment on GitHub, got %d", len(comments))
+	} else {
+		if comments[0].Body != "https://github.com/mayurhalai/cloud-agent/pull/42" {
+			t.Errorf("Expected comment body 'https://github.com/mayurhalai/cloud-agent/pull/42', got '%s'", comments[0].Body)
+		}
+	}
+}
+
+func TestLabelOnPRRejected(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	namespace := "default"
+	scheme := runtime.NewScheme()
+
+	fakeK8s := kubernetesfake.NewSimpleClientset()
+	fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
+		schema.GroupVersionResource{
+			Group:    "cloudagent.mayurhalai.github.com",
+			Version:  "v1alpha1",
+			Resource: "agenttasks",
+		}: "AgentTaskList",
+	})
+	mockGh := &github.MockClient{}
+
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace)
+	server := httptest.NewServer(listener)
+	defer server.Close()
+
+	// 1. Simulate a labeled event on a PR
+	payload := map[string]interface{}{
+		"action": "labeled",
+		"issue": map[string]interface{}{
+			"number": 100,
+			"title":  "PR Title",
+			"body":   "PR Body",
+			"pull_request": map[string]interface{}{
+				"url": "https://api.github.com/repos/mayurhalai/cloud-agent/pulls/100",
+			},
+		},
+		"label": map[string]interface{}{
+			"name": "cloud-agent",
+		},
+		"sender": map[string]interface{}{
+			"login": "test-owner-user",
+			"id":    123456,
+		},
+		"repository": map[string]interface{}{
+			"name": "cloud-agent",
+			"owner": map[string]interface{}{
+				"login": "mayurhalai",
+			},
+		},
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Failed to marshal webhook payload: %v", err)
+	}
+
+	resp, err := http.Post(server.URL+"/webhook", "application/json", bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		t.Fatalf("Failed to POST webhook: %v", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status code 200, got %d", resp.StatusCode)
+	}
+
+	// 2. Verify that no AgentTask CRD was created
+	list, err := fakeDyn.Resource(agentTaskGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("Failed to list AgentTasks: %v", err)
+	}
+	if len(list.Items) != 0 {
+		t.Errorf("Expected 0 AgentTasks, got %d", len(list.Items))
+	}
+
+	// 3. Verify that a rejection comment was posted on GitHub
+	comments := mockGh.GetComments()
+	if len(comments) != 1 {
+		t.Fatalf("Expected 1 comment on GitHub, got %d", len(comments))
+	}
+	if comments[0].Body != "Adding label on a PR is not supported." {
+		t.Errorf("Expected comment body 'Adding label on a PR is not supported.', got '%s'", comments[0].Body)
+	}
+	if comments[0].IssueNumber != 100 {
+		t.Errorf("Expected comment on issue/PR 100, got %d", comments[0].IssueNumber)
+	}
 }

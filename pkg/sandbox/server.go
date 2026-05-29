@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
@@ -23,6 +22,9 @@ type Runner struct {
 	taskOwner         string
 	taskOwnerEmail    string
 	workspaceDir      string
+	taskType          string
+	agentBinary       string
+	prompt            string
 	httpClient        *http.Client
 }
 
@@ -36,6 +38,9 @@ func NewRunner(
 	taskOwner string,
 	taskOwnerEmail string,
 	workspaceDir string,
+	taskType string,
+	agentBinary string,
+	prompt string,
 	httpClient *http.Client,
 ) *Runner {
 	if httpClient == nil {
@@ -50,6 +55,12 @@ func NewRunner(
 	if workspaceDir == "" {
 		workspaceDir = "/workspace"
 	}
+	if taskType == "" {
+		taskType = "comment"
+	}
+	if agentBinary == "" {
+		agentBinary = "opencode"
+	}
 	return &Runner{
 		taskName:          taskName,
 		callbackURL:       callbackURL,
@@ -60,6 +71,9 @@ func NewRunner(
 		taskOwner:         taskOwner,
 		taskOwnerEmail:    taskOwnerEmail,
 		workspaceDir:      workspaceDir,
+		taskType:          taskType,
+		agentBinary:       agentBinary,
+		prompt:            prompt,
 		httpClient:        httpClient,
 	}
 }
@@ -134,35 +148,31 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	// 4. Create and Checkout New Branch
-	branchName := fmt.Sprintf("attribution-test-%s", r.taskName)
-	if err := runGit("checkout", "-b", branchName); err != nil {
-		return err
+	// 4. Create and Checkout New Branch (PR tasks only)
+	if r.taskType == "pr" {
+		branchName := fmt.Sprintf("attribution-test-%s", r.taskName)
+		if err := runGit("checkout", "-b", branchName); err != nil {
+			return err
+		}
 	}
 
-	// 5. Create Dummy Commit
-	dummyFile := filepath.Join(r.workspaceDir, "attribution-test.txt")
-	dummyContent := fmt.Sprintf("Attribution verification for task: %s\nOwner: %s\nEmail: %s\n", r.taskName, r.taskOwner, r.taskOwnerEmail)
-	if err := os.WriteFile(dummyFile, []byte(dummyContent), 0644); err != nil {
-		return fmt.Errorf("failed to write dummy file: %v", err)
+	// 5. Invoke CLI coding agent binary inside workspace
+	agentCmd := exec.CommandContext(ctx, r.agentBinary, r.prompt)
+	agentCmd.Dir = r.workspaceDir
+	var agentStdout, agentStderr bytes.Buffer
+	agentCmd.Stdout = &agentStdout
+	agentCmd.Stderr = &agentStderr
+
+	if err := agentCmd.Run(); err != nil {
+		return sanitizeError(fmt.Errorf("agent %s failed: %v (stderr: %s)", r.agentBinary, err, agentStderr.String()), ghToken)
 	}
 
-	if err := runGit("add", "attribution-test.txt"); err != nil {
-		return err
-	}
-	if err := runGit("commit", "-m", fmt.Sprintf("Verify git attribution for %s", r.taskOwner)); err != nil {
-		return err
-	}
-
-	// 6. Push Branch to Origin
-	if err := runGit("push", "origin", branchName); err != nil {
-		return err
-	}
+	responseStr := strings.TrimSpace(agentStdout.String())
 
 	// Construct request body
 	payload := map[string]string{
 		"taskName": r.taskName,
-		"response": "Hello World",
+		"response": responseStr,
 	}
 
 	payloadBytes, err := json.Marshal(payload)

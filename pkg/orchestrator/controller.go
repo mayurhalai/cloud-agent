@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
@@ -102,6 +103,14 @@ func (o *Orchestrator) Reconcile(ctx context.Context, taskName string) error {
 							{
 								Name:  "REPO_NAME",
 								Value: task.Annotations["cloudagent.mayurhalai.github.com/repo-name"],
+							},
+							{
+								Name:  "TASK_TYPE",
+								Value: task.Annotations["cloudagent.mayurhalai.github.com/task-type"],
+							},
+							{
+								Name:  "AGENT_BINARY",
+								Value: getEnvWithDefault("AGENT_BINARY", "opencode"),
 							},
 						},
 						VolumeMounts: []corev1.VolumeMount{
@@ -216,4 +225,11 @@ func (o *Orchestrator) Start(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func getEnvWithDefault(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
 }

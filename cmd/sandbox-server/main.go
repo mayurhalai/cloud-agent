@@ -20,6 +20,9 @@ func main() {
 	taskOwner := flag.String("task-owner", os.Getenv("TASK_OWNER"), "Owner/triggerer of the task")
 	taskOwnerEmail := flag.String("task-owner-email", os.Getenv("TASK_OWNER_EMAIL"), "Email address of the task owner")
 	workspaceDir := flag.String("workspace-dir", getEnvWithDefault("WORKSPACE_DIR", "/workspace"), "Workspace directory for repository clone")
+	taskType := flag.String("task-type", getEnvWithDefault("TASK_TYPE", "comment"), "Type of the task: pr or comment")
+	agentBinary := flag.String("agent-binary", getEnvWithDefault("AGENT_BINARY", "opencode"), "System-wide default CLI coding agent binary")
+	prompt := flag.String("prompt", os.Getenv("PROMPT"), "Prompt for the coding agent")
 	flag.Parse()
 
 	if *taskName == "" {
@@ -40,6 +43,9 @@ func main() {
 	if *taskOwnerEmail == "" {
 		log.Fatal("task-owner-email parameter or TASK_OWNER_EMAIL environment variable is required")
 	}
+	if *prompt == "" {
+		log.Fatal("prompt parameter or PROMPT environment variable is required")
+	}
 
 	runner := sandbox.NewRunner(
 		*taskName,
@@ -51,18 +57,21 @@ func main() {
 		*taskOwner,
 		*taskOwnerEmail,
 		*workspaceDir,
+		*taskType,
+		*agentBinary,
+		*prompt,
 		nil,
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	log.Printf("Sandbox Server: Running Hello World answer for task %s", *taskName)
+	log.Printf("Sandbox Server: Running coding agent task %s of type %s", *taskName, *taskType)
 	if err := runner.Run(ctx); err != nil {
 		log.Fatalf("Sandbox Server run failed: %s", err.Error())
 	}
 
-	log.Println("Sandbox Server: Hello World completed successfully")
+	log.Println("Sandbox Server: Task completed successfully")
 }
 
 func getEnvWithDefault(key, defaultVal string) string {

@@ -42,19 +42,28 @@ func NewListenerServer(k8sClient kubernetes.Interface, dynClient dynamic.Interfa
 	}
 }
 
-type GitHubIssueCommentEvent struct {
-	Action string `json:"action"`
+type GitHubWebhookEvent struct {
+	Action string `json:"action"` // "created" or "labeled"
 	Issue  struct {
-		Number int    `json:"number"`
-		Title  string `json:"title"`
+		Number      int                    `json:"number"`
+		Title       string                 `json:"title"`
+		Body        string                 `json:"body"`
+		PullRequest map[string]interface{} `json:"pull_request,omitempty"`
 	} `json:"issue"`
-	Comment struct {
+	Comment *struct {
 		Body string `json:"body"`
 		User struct {
 			Login string `json:"login"`
 			ID    int64  `json:"id"`
 		} `json:"user"`
-	} `json:"comment"`
+	} `json:"comment,omitempty"`
+	Label *struct {
+		Name string `json:"name"`
+	} `json:"label,omitempty"`
+	Sender struct {
+		Login string `json:"login"`
+		ID    int64  `json:"id"`
+	} `json:"sender"`
 	Repository struct {
 		Name  string `json:"name"`
 		Owner struct {
@@ -103,23 +112,63 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		_ = r.Body.Close()
 	}()
 
-	var event GitHubIssueCommentEvent
+	var event GitHubWebhookEvent
 	if err := json.Unmarshal(body, &event); err != nil {
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
 
-	// Basic validation: only handle comment creation
-	if event.Action != "created" {
+	var taskType string
+	var prompt string
+	var taskOwner string
+	var taskOwnerEmail string
+
+	repoOwner := event.Repository.Owner.Login
+	repoName := event.Repository.Name
+
+	switch event.Action {
+	case "created":
+		if event.Comment == nil {
+			http.Error(w, "Missing comment object for created action", http.StatusBadRequest)
+			return
+		}
+		taskType = "comment"
+		prompt = event.Comment.Body
+		taskOwner = event.Comment.User.Login
+		taskOwnerEmail = fmt.Sprintf("%d+%s@users.noreply.github.com", event.Comment.User.ID, event.Comment.User.Login)
+	case "labeled":
+		if event.Label == nil || event.Label.Name != "cloud-agent" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("Ignored non-cloud-agent label event"))
+			return
+		}
+		// Check if it is a Pull Request
+		if event.Issue.PullRequest != nil {
+			err = s.ghClient.PostComment(repoOwner, repoName, event.Issue.Number, "Adding label on a PR is not supported.")
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Failed to post comment to GitHub: %v", err), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("Adding label on a PR is not supported."))
+			return
+		}
+		taskType = "pr"
+		if event.Issue.Body != "" {
+			prompt = event.Issue.Title + "\n\n" + event.Issue.Body
+		} else {
+			prompt = event.Issue.Title
+		}
+		taskOwner = event.Sender.Login
+		taskOwnerEmail = fmt.Sprintf("%d+%s@users.noreply.github.com", event.Sender.ID, event.Sender.Login)
+	default:
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("Ignored non-create action"))
+		_, _ = w.Write([]byte("Ignored unsupported action"))
 		return
 	}
 
 	// Webhook Listener fetches `.cloud-agent.yaml` from the repository to read the `SandboxTemplate`
 	sandboxTemplate := "default"
-	repoOwner := event.Repository.Owner.Login
-	repoName := event.Repository.Name
 	configBytes, err := s.ghClient.GetFile(repoOwner, repoName, ".cloud-agent.yaml")
 	if err == nil {
 		var config struct {
@@ -181,7 +230,7 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse issue comment event information to populate the AgentTask CRD
+	// Parse issue comment/label event information to populate the AgentTask CRD
 	agentTask := &v1alpha1.AgentTask{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "cloudagent.mayurhalai.github.com/v1alpha1",
@@ -192,15 +241,16 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			Namespace: s.namespace,
 			Annotations: map[string]string{
 				"cloudagent.mayurhalai.github.com/issue-number": fmt.Sprintf("%d", event.Issue.Number),
-				"cloudagent.mayurhalai.github.com/repo-owner":   event.Repository.Owner.Login,
-				"cloudagent.mayurhalai.github.com/repo-name":    event.Repository.Name,
+				"cloudagent.mayurhalai.github.com/repo-owner":   repoOwner,
+				"cloudagent.mayurhalai.github.com/repo-name":    repoName,
+				"cloudagent.mayurhalai.github.com/task-type":    taskType,
 			},
 		},
 		Spec: v1alpha1.AgentTaskSpec{
-			Prompt:                 event.Comment.Body,
+			Prompt:                 prompt,
 			SandboxTemplate:        sandboxTemplate,
-			TaskOwner:              event.Comment.User.Login,
-			TaskOwnerEmail:         fmt.Sprintf("%d+%s@users.noreply.github.com", event.Comment.User.ID, event.Comment.User.Login),
+			TaskOwner:              taskOwner,
+			TaskOwnerEmail:         taskOwnerEmail,
 			GitHubTokenSecretRef:   ghSecretName,
 			CallbackTokenSecretRef: cbSecretName,
 		},
