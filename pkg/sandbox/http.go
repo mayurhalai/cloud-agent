@@ -119,3 +119,23 @@ func TaskHandler(w http.ResponseWriter, r *http.Request) {
 		Message: "Task completed successfully",
 	})
 }
+
+// HealthCheckHandler handles health check requests to the GET /health endpoint.
+func HealthCheckHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(TaskResponse{
+			Status:  "error",
+			Message: "Method not allowed. Only GET is supported.",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(TaskResponse{
+		Status:  "success",
+		Message: "Health check success",
+	})
+}

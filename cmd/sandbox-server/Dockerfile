@@ -22,7 +22,7 @@ WORKDIR /app
 COPY --from=builder /app/sandbox-server /app/sandbox-server
 
 # Expose the default HTTP port
-EXPOSE 8080
+EXPOSE 8888
 
 # Execute the HTTP daemon by default
 ENTRYPOINT ["/app/sandbox-server"]
