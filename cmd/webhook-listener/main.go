@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 
 	"github.com/mayurhalai/cloud-agent/pkg/github"
 	"github.com/mayurhalai/cloud-agent/pkg/webhook"
@@ -39,8 +41,25 @@ func main() {
 		log.Fatalf("Error building dynamic client: %s", err.Error())
 	}
 
-	// In Sprint 1a, we use the mock GitHub client.
-	ghClient := &github.MockClient{}
+	// Check environment variables to instantiate either the real AppClient or MockClient
+	var ghClient github.Client
+	appIDStr := os.Getenv("GITHUB_APP_ID")
+	privateKeyPath := os.Getenv("GITHUB_APP_PRIVATE_KEY_PATH")
+
+	if appIDStr != "" && privateKeyPath != "" {
+		appID, err := strconv.ParseInt(appIDStr, 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid GITHUB_APP_ID: %v", err)
+		}
+		ghClient, err = github.NewAppClient(appID, privateKeyPath)
+		if err != nil {
+			log.Fatalf("Failed to create GitHub App client: %v", err)
+		}
+		log.Printf("Using real GitHub App client (App ID: %d)", appID)
+	} else {
+		log.Printf("Warning: GITHUB_APP_ID or GITHUB_APP_PRIVATE_KEY_PATH not set. Falling back to MockClient.")
+		ghClient = &github.MockClient{}
+	}
 
 	server := webhook.NewListenerServer(k8sClient, dynClient, ghClient, *namespace)
 
