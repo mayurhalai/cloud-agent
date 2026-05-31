@@ -20,6 +20,7 @@ import (
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
 	"github.com/mayurhalai/cloud-agent/pkg/github"
 	"github.com/mayurhalai/cloud-agent/pkg/orchestrator"
+	"github.com/mayurhalai/cloud-agent/pkg/sandbox"
 	"github.com/mayurhalai/cloud-agent/pkg/webhook"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -169,6 +170,38 @@ fi
 			_, _ = io.Copy(outFile, file)
 
 			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if r.URL.Path == "/task" {
+			var req sandbox.TaskRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			// Validate required fields
+			if req.TaskName == "" || req.CallbackURL == "" || req.RepoOwner == "" || req.RepoName == "" || req.TaskOwner == "" || req.TaskOwnerEmail == "" || req.Prompt == "" {
+				http.Error(w, "Missing required fields in TaskRequest", http.StatusBadRequest)
+				return
+			}
+
+			// Rewrite relative token paths to absolute paths in tmpDir
+			req.CallbackTokenPath = filepath.Join(tmpDir, req.CallbackTokenPath)
+			req.GitHubTokenPath = filepath.Join(tmpDir, req.GitHubTokenPath)
+
+			// Serialize back to JSON for the handler
+			updatedBody, err := json.Marshal(req)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			newReq := r.Clone(r.Context())
+			newReq.Body = io.NopCloser(bytes.NewReader(updatedBody))
+			newReq.ContentLength = int64(len(updatedBody))
+
+			sandbox.TaskHandler(w, newReq)
 			return
 		}
 
@@ -632,6 +665,38 @@ echo "https://github.com/mayurhalai/cloud-agent/pull/42"
 			_, _ = io.Copy(outFile, file)
 
 			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if r.URL.Path == "/task" {
+			var req sandbox.TaskRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			// Validate required fields
+			if req.TaskName == "" || req.CallbackURL == "" || req.RepoOwner == "" || req.RepoName == "" || req.TaskOwner == "" || req.TaskOwnerEmail == "" || req.Prompt == "" {
+				http.Error(w, "Missing required fields in TaskRequest", http.StatusBadRequest)
+				return
+			}
+
+			// Rewrite relative token paths to absolute paths in tmpDir
+			req.CallbackTokenPath = filepath.Join(tmpDir, req.CallbackTokenPath)
+			req.GitHubTokenPath = filepath.Join(tmpDir, req.GitHubTokenPath)
+
+			// Serialize back to JSON for the handler
+			updatedBody, err := json.Marshal(req)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			newReq := r.Clone(r.Context())
+			newReq.Body = io.NopCloser(bytes.NewReader(updatedBody))
+			newReq.ContentLength = int64(len(updatedBody))
+
+			sandbox.TaskHandler(w, newReq)
 			return
 		}
 
