@@ -155,7 +155,6 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 		targetURL = fmt.Sprintf("http://%s:8080/task", pod.Status.PodIP)
 	}
 
-	sbWrap := sandbox.Wrap(sb)
 	req := &sandbox.TaskRequest{
 		TaskName:          task.Name,
 		CallbackURL:       getEnvWithDefault("CALLBACK_URL", "http://webhook-listener/callback"),
@@ -172,7 +171,7 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 	}
 
 	log.Printf("Executing sandbox-server inside sandbox for task %s", task.Name)
-	if err := sbWrap.ExecuteTask(ctx, targetURL, req); err != nil {
+	if err := sandbox.ExecuteTask(ctx, targetURL, req); err != nil {
 		log.Printf("Failed to execute task %s inside sandbox: %v", task.Name, err)
 		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
 		return

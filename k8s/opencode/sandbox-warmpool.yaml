@@ -1,0 +1,10 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: opencode-sandbox-warmpool
+  labels:
+    app: opencode-sandbox-warmpool
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: opencode-sandbox-template

@@ -7,22 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-
-	agentsandbox "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 )
 
-// Sandbox wraps the agentsandbox.Sandbox to extend its capabilities.
-type Sandbox struct {
-	*agentsandbox.Sandbox
-}
-
-// Wrap creates a new custom Sandbox wrapper from an agentsandbox.Sandbox instance.
-func Wrap(sb *agentsandbox.Sandbox) *Sandbox {
-	return &Sandbox{Sandbox: sb}
-}
-
 // ExecuteTask delivers the task payload directly to the Sandbox Server via an HTTP POST request.
-func (s *Sandbox) ExecuteTask(ctx context.Context, targetURL string, req *TaskRequest) error {
+func ExecuteTask(ctx context.Context, targetURL string, req *TaskRequest) error {
 	payloadBytes, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("failed to marshal task request: %w", err)

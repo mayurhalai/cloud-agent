@@ -14,15 +14,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o sandbox-server ./cmd/sandbox-server
 
 # Runtime stage
-FROM alpine:3.20
-
-WORKDIR /app
+FROM scratch
 
 # Copy the compiled binary
 COPY --from=builder /app/sandbox-server /app/sandbox-server
-
-# Expose the default HTTP port
-EXPOSE 8888
-
-# Execute the HTTP daemon by default
-ENTRYPOINT ["/app/sandbox-server"]
