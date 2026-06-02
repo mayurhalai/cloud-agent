@@ -16,5 +16,10 @@ kubectl create namespace cloud-agent
 # Create secret
 kubectl apply -f /Users/mayurhalai/repos/crap/secrets/github-app-secret.yaml -n cloud-agent
 
+# Load images
+kind load docker-image webhook-listener:latest --name desktop
+kind load docker-image orchestrator:latest --name desktop
+kind load docker-image agent-pi:latest --name desktop
+
 # Deploy pi agent sandbox
 kubectl apply -k k8s/pi
