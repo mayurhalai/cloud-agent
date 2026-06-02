@@ -11,9 +11,11 @@ spec:
       labels:
         app: sandbox-orchestrator
     spec:
+      serviceAccountName: sandbox-orchestrator
       containers:
         - name: sandbox-orchestrator
           image: orchestrator:latest
+          imagePullPolicy: IfNotPresent
           resources:
             requests:
               memory: "64Mi"

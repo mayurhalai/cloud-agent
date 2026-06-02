@@ -12,9 +12,11 @@ spec:
       labels:
         app: webhook-listener
     spec:
+      serviceAccountName: webhook-listener
       containers:
         - name: webhook-listener
           image: webhook-listener:latest
+          imagePullPolicy: IfNotPresent
           resources:
             requests:
               memory: "64Mi"
