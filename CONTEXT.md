@@ -12,12 +12,16 @@ _Avoid_: Task, Job, Request
 The component that receives GitHub events, processes them, and creates AgentTasks.
 _Avoid_: GitHub application web-hook listener
 
+**GitHub App**:
+The GitHub integration type used by the Webhook Listener to receive events and authenticate via installation tokens, instead of using a Personal Access Token.
+_Avoid_: GitHub Client, GitHub App integration
+
 **Orchestrator**:
 The Kubernetes controller that watches AgentTasks, manages warm pools via `sigs.k8s.io/agent-sandbox`, and assigns tasks to sandboxes.
 _Avoid_: Agent sandbox orchestration controller, Agent orchestrator, agent-sandbox client
 
 **Sandbox Server**:
-The server process running inside the sandbox container that receives the prompt, invokes the coding agent, and reports completion.
+The long-running HTTP daemon acting as the entrypoint inside the sandbox container. It exposes a POST endpoint to receive tasks from the Orchestrator, invokes the coding agent, and reports completion. Its Docker image serves as the base image for all SandboxTemplates.
 _Avoid_: Agent sandbox server
 
 **SandboxTemplate**:

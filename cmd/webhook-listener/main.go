@@ -5,27 +5,25 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 
 	"github.com/mayurhalai/cloud-agent/pkg/github"
 	"github.com/mayurhalai/cloud-agent/pkg/webhook"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/rest"
 )
 
 func main() {
 	port := flag.Int("port", 8080, "Port to listen on")
-	kubeconfig := flag.String("kubeconfig", "", "Path to a kubeconfig file")
-	namespace := flag.String("namespace", "default", "Kubernetes namespace to run in")
+	namespace := flag.String("namespace", "cloud-agent", "Kubernetes namespace to run in")
 	flag.Parse()
 
 	// Load kubeconfig
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	config, err := rest.InClusterConfig()
 	if err != nil {
-		// Fallback to in-cluster config
-		if config, err = clientcmd.BuildConfigFromFlags("", ""); err != nil {
-			log.Fatalf("Error building kubeconfig: %s", err.Error())
-		}
+		log.Fatalf("Error building kubeconfig: %s", err.Error())
 	}
 
 	// Create clients
@@ -39,10 +37,28 @@ func main() {
 		log.Fatalf("Error building dynamic client: %s", err.Error())
 	}
 
-	// In Sprint 1a, we use the mock GitHub client.
-	ghClient := &github.MockClient{}
+	// Check environment variables to instantiate either the real AppClient or MockClient
+	var ghClient github.Client
+	appIDStr := os.Getenv("GITHUB_APP_ID")
+	privateKeyPath := os.Getenv("GITHUB_APP_PRIVATE_KEY_PATH")
 
-	server := webhook.NewListenerServer(k8sClient, dynClient, ghClient, *namespace)
+	if appIDStr != "" && privateKeyPath != "" {
+		appID, err := strconv.ParseInt(appIDStr, 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid GITHUB_APP_ID: %v", err)
+		}
+		ghClient, err = github.NewAppClient(appID, privateKeyPath)
+		if err != nil {
+			log.Fatalf("Failed to create GitHub App client: %v", err)
+		}
+		log.Printf("Using real GitHub App client (App ID: %d)", appID)
+	} else {
+		log.Printf("Warning: GITHUB_APP_ID or GITHUB_APP_PRIVATE_KEY_PATH not set. Falling back to MockClient.")
+		ghClient = &github.MockClient{}
+	}
+
+	webhookSecret := os.Getenv("GITHUB_APP_WEBHOOK_SECRET")
+	server := webhook.NewListenerServer(k8sClient, dynClient, ghClient, *namespace, []byte(webhookSecret))
 
 	addr := fmt.Sprintf(":%d", *port)
 	log.Printf("Starting Webhook Listener on %s", addr)

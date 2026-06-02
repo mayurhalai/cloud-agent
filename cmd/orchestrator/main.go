@@ -11,19 +11,17 @@ import (
 	"github.com/mayurhalai/cloud-agent/pkg/orchestrator"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/rest"
 )
 
 func main() {
-	kubeconfig := flag.String("kubeconfig", "", "Path to a kubeconfig file")
-	namespace := flag.String("namespace", "default", "Kubernetes namespace to watch")
+	namespace := flag.String("namespace", "cloud-agent", "Kubernetes namespace to watch")
 	flag.Parse()
 
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	// In cluster kubeconfig
+	config, err := rest.InClusterConfig()
 	if err != nil {
-		if config, err = clientcmd.BuildConfigFromFlags("", ""); err != nil {
-			log.Fatalf("Error building kubeconfig: %s", err.Error())
-		}
+		log.Fatalf("Error building kubeconfig: %s", err.Error())
 	}
 
 	k8sClient, err := kubernetes.NewForConfig(config)

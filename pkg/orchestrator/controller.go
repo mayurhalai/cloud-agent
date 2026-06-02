@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
 
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
+	"github.com/mayurhalai/cloud-agent/pkg/sandbox"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -141,41 +141,44 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 		return
 	}
 
-	// Run sandbox-server inside the sandbox
-	cmdStr := fmt.Sprintf("TASK_NAME=%s CALLBACK_URL=%s CALLBACK_TOKEN_PATH=%s GITHUB_TOKEN_PATH=%s REPO_OWNER=%s REPO_NAME=%s TASK_OWNER=%s TASK_OWNER_EMAIL=%s TASK_TYPE=%s AGENT_BINARY=%s PROMPT=%s sandbox-server",
-		escapeShellArg(task.Name),
-		escapeShellArg(getEnvWithDefault("CALLBACK_URL", "http://webhook-listener/callback")),
-		escapeShellArg("callback-token"),
-		escapeShellArg("github-token"),
-		escapeShellArg(task.Annotations["cloudagent.mayurhalai.github.com/repo-owner"]),
-		escapeShellArg(task.Annotations["cloudagent.mayurhalai.github.com/repo-name"]),
-		escapeShellArg(task.Spec.TaskOwner),
-		escapeShellArg(task.Spec.TaskOwnerEmail),
-		escapeShellArg(task.Annotations["cloudagent.mayurhalai.github.com/task-type"]),
-		escapeShellArg(getEnvWithDefault("AGENT_BINARY", "opencode")),
-		escapeShellArg(task.Spec.Prompt),
-	)
-
-	log.Printf("Executing sandbox-server inside sandbox for task %s", task.Name)
-	res, err := sb.Run(ctx, cmdStr)
-	if err != nil {
-		log.Printf("Failed to run sandbox-server for task %s: %v", task.Name, err)
-		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
-		return
+	// Determine target URL for task dispatch
+	var targetURL string
+	if testURL := os.Getenv("TEST_SANDBOX_API_URL"); testURL != "" {
+		targetURL = testURL + "/task"
+	} else {
+		pod, err := o.k8sClient.CoreV1().Pods(o.namespace).Get(ctx, sb.PodName(), metav1.GetOptions{})
+		if err != nil {
+			log.Printf("Failed to get sandbox pod %s for task %s: %v", sb.PodName(), task.Name, err)
+			_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+			return
+		}
+		targetURL = fmt.Sprintf("http://%s:8080/task", pod.Status.PodIP)
 	}
 
-	if res.ExitCode != 0 {
-		log.Printf("sandbox-server for task %s exited with code %d. Stderr: %s", task.Name, res.ExitCode, res.Stderr)
+	req := &sandbox.TaskRequest{
+		TaskName:          task.Name,
+		CallbackURL:       getEnvWithDefault("CALLBACK_URL", "http://webhook-listener/callback"),
+		CallbackTokenPath: "callback-token",
+		GitHubTokenPath:   "github-token",
+		RepoOwner:         task.Annotations["cloudagent.mayurhalai.github.com/repo-owner"],
+		RepoName:          task.Annotations["cloudagent.mayurhalai.github.com/repo-name"],
+		TaskOwner:         task.Spec.TaskOwner,
+		TaskOwnerEmail:    task.Spec.TaskOwnerEmail,
+		WorkspaceDir:      getEnvWithDefault("WORKSPACE_DIR", "/workspace"),
+		TaskType:          task.Annotations["cloudagent.mayurhalai.github.com/task-type"],
+		AgentBinary:       getEnvWithDefault("AGENT_BINARY", "opencode"),
+		Prompt:            task.Spec.Prompt,
+	}
+
+	log.Printf("Executing sandbox-server inside sandbox for task %s", task.Name)
+	if err := sandbox.ExecuteTask(ctx, targetURL, req); err != nil {
+		log.Printf("Failed to execute task %s inside sandbox: %v", task.Name, err)
 		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
 		return
 	}
 
 	log.Printf("Task %s completed successfully in sandbox", task.Name)
 	_ = o.updateTaskState(ctx, task, v1alpha1.StateDeleted)
-}
-
-func escapeShellArg(arg string) string {
-	return "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
 }
 
 func (o *Orchestrator) updateTaskState(ctx context.Context, task *v1alpha1.AgentTask, state v1alpha1.AgentTaskState) error {

@@ -1,0 +1,65 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-listener
+spec:
+  selector:
+    matchLabels:
+      app: webhook-listener
+  template:
+    metadata:
+      labels:
+        app: webhook-listener
+    spec:
+      serviceAccountName: webhook-listener
+      containers:
+        - name: webhook-listener
+          image: webhook-listener:latest
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: github-app-secret
+                  key: github-app-id
+            - name: GITHUB_APP_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: github-app-secret
+                  key: github-app-webhook-secret
+                  optional: true
+            - name: GITHUB_APP_PRIVATE_KEY_PATH
+              value: /etc/github/private-key.pem
+          volumeMounts:
+            - name: github-app-key
+              mountPath: /etc/github
+              readOnly: true
+      volumes:
+        - name: github-app-key
+          secret:
+            secretName: github-app-secret
+            items:
+              - key: github-app-key
+                path: private-key.pem
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-listener
+spec:
+  type: LoadBalancer
+  selector:
+    app: webhook-listener
+  ports:
+    - port: 8080
+      targetPort: 8080

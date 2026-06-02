@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-orchestrator
+spec:
+  selector:
+    matchLabels:
+      app: sandbox-orchestrator
+  template:
+    metadata:
+      labels:
+        app: sandbox-orchestrator
+    spec:
+      serviceAccountName: sandbox-orchestrator
+      containers:
+        - name: sandbox-orchestrator
+          image: orchestrator:latest
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"

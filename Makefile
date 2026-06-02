@@ -27,3 +27,24 @@ fmt:
 clean:
 	@echo "Cleaning up..."
 	rm -rf bin
+
+containers: container-sandbox-server container-webhook-listener container-orchestrator container-agent-pi container-agent-opencode
+
+container-sandbox-server:
+	@docker build -t sandbox-server -f cmd/sandbox-server/Dockerfile .
+
+container-webhook-listener:
+	@docker build -t webhook-listener -f cmd/webhook-listener/Dockerfile .
+	@kind load docker-image webhook-listener:latest --name desktop
+
+container-orchestrator:
+	@docker build -t orchestrator -f cmd/orchestrator/Dockerfile .
+	@kind load docker-image orchestrator:latest --name desktop
+
+container-agent-pi:
+	@docker build -t agent-pi -f sandboxes/agents/pi/Dockerfile .
+	@kind load docker-image agent-pi:latest --name desktop
+
+container-agent-opencode:
+	@docker build -t agent-opencode -f sandboxes/agents/opencode/Dockerfile .
+	@kind load docker-image agent-opencode:latest --name desktop
