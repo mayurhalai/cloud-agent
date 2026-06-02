@@ -57,7 +57,8 @@ func main() {
 		ghClient = &github.MockClient{}
 	}
 
-	server := webhook.NewListenerServer(k8sClient, dynClient, ghClient, *namespace)
+	webhookSecret := os.Getenv("GITHUB_APP_WEBHOOK_SECRET")
+	server := webhook.NewListenerServer(k8sClient, dynClient, ghClient, *namespace, []byte(webhookSecret))
 
 	addr := fmt.Sprintf(":%d", *port)
 	log.Printf("Starting Webhook Listener on %s", addr)

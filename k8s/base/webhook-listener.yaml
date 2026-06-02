@@ -32,6 +32,12 @@ spec:
                 secretKeyRef:
                   name: github-app-secret
                   key: github-app-id
+            - name: GITHUB_APP_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: github-app-secret
+                  key: github-app-webhook-secret
+                  optional: true
             - name: GITHUB_APP_PRIVATE_KEY_PATH
               value: /etc/github/private-key.pem
           volumeMounts:

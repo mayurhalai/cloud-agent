@@ -1,7 +1,9 @@
 package webhook
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -27,18 +29,20 @@ var agentTaskGVR = schema.GroupVersionResource{
 }
 
 type ListenerServer struct {
-	k8sClient kubernetes.Interface
-	dynClient dynamic.Interface
-	ghClient  github.Client
-	namespace string
+	k8sClient     kubernetes.Interface
+	dynClient     dynamic.Interface
+	ghClient      github.Client
+	namespace     string
+	webhookSecret []byte
 }
 
-func NewListenerServer(k8sClient kubernetes.Interface, dynClient dynamic.Interface, ghClient github.Client, namespace string) *ListenerServer {
+func NewListenerServer(k8sClient kubernetes.Interface, dynClient dynamic.Interface, ghClient github.Client, namespace string, webhookSecret []byte) *ListenerServer {
 	return &ListenerServer{
-		k8sClient: k8sClient,
-		dynClient: dynClient,
-		ghClient:  ghClient,
-		namespace: namespace,
+		k8sClient:     k8sClient,
+		dynClient:     dynClient,
+		ghClient:      ghClient,
+		namespace:     namespace,
+		webhookSecret: webhookSecret,
 	}
 }
 
@@ -111,6 +115,19 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		_ = r.Body.Close()
 	}()
+
+	if len(s.webhookSecret) > 0 {
+		signature := r.Header.Get("X-Hub-Signature-256")
+		if signature == "" {
+			http.Error(w, "Missing X-Hub-Signature-256 header", http.StatusUnauthorized)
+			return
+		}
+
+		if !validateSignature(s.webhookSecret, body, signature) {
+			http.Error(w, "Invalid webhook signature", http.StatusUnauthorized)
+			return
+		}
+	}
 
 	var event GitHubWebhookEvent
 	if err := json.Unmarshal(body, &event); err != nil {
@@ -390,4 +407,22 @@ func generateRandomHex(n int) string {
 		return "abcd"
 	}
 	return hex.EncodeToString(bytes)
+}
+
+func validateSignature(secret []byte, payload []byte, signatureHeader string) bool {
+	const prefix = "sha256="
+	if !strings.HasPrefix(signatureHeader, prefix) {
+		return false
+	}
+	hexSig := strings.TrimPrefix(signatureHeader, prefix)
+	sigBytes, err := hex.DecodeString(hexSig)
+	if err != nil {
+		return false
+	}
+
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write(payload)
+	expectedMAC := mac.Sum(nil)
+
+	return hmac.Equal(sigBytes, expectedMAC)
 }

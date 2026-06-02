@@ -3,6 +3,9 @@ package tests
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -251,7 +254,7 @@ fi
 	t.Setenv("TEST_SANDBOX_API_URL", mockSandboxServer.URL)
 
 	// 2. Set up Webhook Listener HTTP Server
-	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace)
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil)
 	server := httptest.NewServer(listener)
 	defer server.Close()
 
@@ -436,7 +439,7 @@ func TestCallbackEndpointAuthentication(t *testing.T) {
 	})
 	mockGh := &github.MockClient{}
 
-	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace)
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil)
 	server := httptest.NewServer(listener)
 	defer server.Close()
 
@@ -746,7 +749,7 @@ echo "https://github.com/mayurhalai/cloud-agent/pull/42"
 	t.Setenv("TEST_SANDBOX_API_URL", mockSandboxServer.URL)
 
 	// 2. Set up Webhook Listener HTTP Server
-	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace)
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil)
 	server := httptest.NewServer(listener)
 	defer server.Close()
 
@@ -894,7 +897,7 @@ func TestLabelOnPRRejected(t *testing.T) {
 	})
 	mockGh := &github.MockClient{}
 
-	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace)
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil)
 	server := httptest.NewServer(listener)
 	defer server.Close()
 
@@ -961,6 +964,106 @@ func TestLabelOnPRRejected(t *testing.T) {
 	if comments[0].IssueNumber != 100 {
 		t.Errorf("Expected comment on issue/PR 100, got %d", comments[0].IssueNumber)
 	}
+}
+
+func TestWebhookSignatureValidation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	namespace := "default"
+	scheme := runtime.NewScheme()
+
+	fakeK8s := kubernetesfake.NewSimpleClientset()
+	fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
+		schema.GroupVersionResource{
+			Group:    "cloudagent.mayurhalai.github.com",
+			Version:  "v1alpha1",
+			Resource: "agenttasks",
+		}: "AgentTaskList",
+	})
+	mockGh := &github.MockClient{}
+	mockGh.SetFile("mayurhalai", "cloud-agent", ".cloud-agent.yaml", []byte("sandboxTemplate: default"))
+
+	webhookSecret := []byte("my-super-secret-key")
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, webhookSecret)
+	server := httptest.NewServer(listener)
+	defer server.Close()
+
+	payload := map[string]interface{}{
+		"action": "created",
+		"issue": map[string]interface{}{
+			"number": 1,
+			"title":  "Test Issue",
+		},
+		"comment": map[string]interface{}{
+			"body": "cloud-agent answer",
+			"user": map[string]interface{}{
+				"login": "test-owner-user",
+				"id":    123456,
+			},
+		},
+		"repository": map[string]interface{}{
+			"name": "cloud-agent",
+			"owner": map[string]interface{}{
+				"login": "mayurhalai",
+			},
+		},
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Failed to marshal webhook payload: %v", err)
+	}
+
+	// 1. Missing signature header -> StatusUnauthorized (401)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/webhook", bytes.NewBuffer(payloadBytes))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to POST webhook: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("Expected status code 401 for missing signature, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if !strings.Contains(string(body), "Missing X-Hub-Signature-256 header") {
+		t.Errorf("Expected response body to mention missing header, got %q", string(body))
+	}
+
+	// 2. Invalid signature header -> StatusUnauthorized (401)
+	req, _ = http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/webhook", bytes.NewBuffer(payloadBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hub-Signature-256", "sha256=invalid-signature-hex-1234")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to POST webhook: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("Expected status code 401 for invalid signature, got %d", resp.StatusCode)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if !strings.Contains(string(body), "Invalid webhook signature") {
+		t.Errorf("Expected response body to mention invalid signature, got %q", string(body))
+	}
+
+	// 3. Valid signature header -> StatusCreated (201)
+	mac := hmac.New(sha256.New, webhookSecret)
+	mac.Write(payloadBytes)
+	validSig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+	req, _ = http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/webhook", bytes.NewBuffer(payloadBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hub-Signature-256", validSig)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to POST webhook: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("Expected status code 201 for valid signature, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
 }
 
 func startFakeSandboxController(ctx context.Context, agentsClient agentsv1alpha1.AgentsV1alpha1Interface, extensionsClient extensionsclientv1alpha1.ExtensionsV1alpha1Interface, namespace string) {
