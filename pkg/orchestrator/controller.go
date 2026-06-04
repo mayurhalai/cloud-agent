@@ -2,9 +2,14 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
+	"strings"
 
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
 	"github.com/mayurhalai/cloud-agent/pkg/sandbox"
@@ -56,9 +61,9 @@ func (o *Orchestrator) Reconcile(ctx context.Context, taskName string) error {
 
 	switch state {
 	case v1alpha1.StatePending:
-		// Transition task to StateRunning immediately
-		if err := o.updateTaskState(ctx, task, v1alpha1.StateRunning); err != nil {
-			return fmt.Errorf("failed to update task state to Running: %v", err)
+		// Transition task to StateStarted before requesting tokens
+		if err := o.updateTaskState(ctx, task, v1alpha1.StateStarted); err != nil {
+			return fmt.Errorf("failed to update task state to Started: %v", err)
 		}
 
 		// Spawn background goroutine to execute task
@@ -71,6 +76,23 @@ func (o *Orchestrator) Reconcile(ctx context.Context, taskName string) error {
 	}
 
 	return nil
+}
+
+type tokenResponse struct {
+	GitHubToken   string `json:"gitHubToken"`
+	CallbackToken string `json:"callbackToken"`
+}
+
+func (o *Orchestrator) getTokenURL(taskID string) string {
+	if urlVal := os.Getenv("WEBHOOK_LISTENER_URL"); urlVal != "" {
+		return fmt.Sprintf("%s/task/%s/tokens", strings.TrimSuffix(urlVal, "/"), taskID)
+	}
+	callbackURL := getEnvWithDefault("CALLBACK_URL", "http://webhook-listener/callback")
+	if u, err := url.Parse(callbackURL); err == nil {
+		u.Path = fmt.Sprintf("/task/%s/tokens", taskID)
+		return u.String()
+	}
+	return fmt.Sprintf("http://webhook-listener/task/%s/tokens", taskID)
 }
 
 func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
@@ -106,38 +128,42 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 		}
 	}()
 
-	// Fetch callback token and github token from Secrets
-	cbSecret, err := o.k8sClient.CoreV1().Secrets(o.namespace).Get(ctx, task.Spec.CallbackTokenSecretRef, metav1.GetOptions{})
+	// Call Webhook Listener JIT API to fetch tokens
+	tokenURL := o.getTokenURL(task.Name)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, nil)
 	if err != nil {
-		log.Printf("Failed to get callback token secret for task %s: %v", task.Name, err)
+		log.Printf("Failed to create token request for task %s: %v", task.Name, err)
 		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
 		return
-	}
-	callbackToken := string(cbSecret.Data["token"])
-	if callbackToken == "" {
-		callbackToken = cbSecret.StringData["token"]
 	}
 
-	ghSecret, err := o.k8sClient.CoreV1().Secrets(o.namespace).Get(ctx, task.Spec.GitHubTokenSecretRef, metav1.GetOptions{})
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("Failed to get github token secret for task %s: %v", task.Name, err)
+		log.Printf("Failed to request tokens for task %s: %v", task.Name, err)
 		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
 		return
 	}
-	githubToken := string(ghSecret.Data["token"])
-	if githubToken == "" {
-		githubToken = ghSecret.StringData["token"]
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<10))
+		log.Printf("Token API returned non-OK status %d for task %s: %s", resp.StatusCode, task.Name, string(bodyBytes))
+		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+		return
 	}
 
-	// Write tokens to the sandbox
-	if err := sb.Write(ctx, "callback-token", []byte(callbackToken)); err != nil {
-		log.Printf("Failed to write callback token inside sandbox for task %s: %v", task.Name, err)
+	var tokResp tokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tokResp); err != nil {
+		log.Printf("Failed to decode token response for task %s: %v", task.Name, err)
 		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
 		return
 	}
-	if err := sb.Write(ctx, "github-token", []byte(githubToken)); err != nil {
-		log.Printf("Failed to write github token inside sandbox for task %s: %v", task.Name, err)
-		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+
+	// Transition task to StateRunning after receiving tokens
+	if err := o.updateTaskState(ctx, task, v1alpha1.StateRunning); err != nil {
+		log.Printf("Failed to update task state to Running for task %s: %v", task.Name, err)
 		return
 	}
 
@@ -155,11 +181,13 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 		targetURL = fmt.Sprintf("http://%s:8080/task", pod.Status.PodIP)
 	}
 
-	req := &sandbox.TaskRequest{
+	taskReq := &sandbox.TaskRequest{
 		TaskName:          task.Name,
 		CallbackURL:       getEnvWithDefault("CALLBACK_URL", "http://webhook-listener/callback"),
 		CallbackTokenPath: "callback-token",
 		GitHubTokenPath:   "github-token",
+		CallbackToken:     tokResp.CallbackToken,
+		GitHubToken:       tokResp.GitHubToken,
 		RepoOwner:         task.Annotations["cloudagent.mayurhalai.github.com/repo-owner"],
 		RepoName:          task.Annotations["cloudagent.mayurhalai.github.com/repo-name"],
 		TaskOwner:         task.Spec.TaskOwner,
@@ -171,7 +199,7 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 	}
 
 	log.Printf("Executing sandbox-server inside sandbox for task %s", task.Name)
-	if err := sandbox.ExecuteTask(ctx, targetURL, req); err != nil {
+	if err := sandbox.ExecuteTask(ctx, targetURL, taskReq); err != nil {
 		log.Printf("Failed to execute task %s inside sandbox: %v", task.Name, err)
 		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
 		return

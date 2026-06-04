@@ -10,6 +10,7 @@ type AgentTaskState string
 
 const (
 	StatePending   AgentTaskState = "Pending"
+	StateStarted   AgentTaskState = "Started"
 	StateRunning   AgentTaskState = "Running"
 	StateCompleted AgentTaskState = "Completed"
 	StateFailed    AgentTaskState = "Failed"

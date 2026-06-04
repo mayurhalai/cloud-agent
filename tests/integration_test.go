@@ -25,7 +25,6 @@ import (
 	"github.com/mayurhalai/cloud-agent/pkg/orchestrator"
 	"github.com/mayurhalai/cloud-agent/pkg/sandbox"
 	"github.com/mayurhalai/cloud-agent/pkg/webhook"
-	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -91,67 +90,6 @@ func TestEndToEndHelloWorld(t *testing.T) {
 	})
 
 	fakeDyn.PrependReactor("create", "agenttasks", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
-		createAction := action.(clientgotesting.CreateAction)
-		uObj := createAction.GetObject().(*unstructured.Unstructured)
-		task, err := v1alpha1.FromUnstructured(uObj)
-		if err != nil {
-			return false, nil, err
-		}
-
-		// Generate mock tokens to populate secrets for the orchestrator (old flow)
-		githubToken := "mock-github-token"
-		callbackToken := "mock-callback-token-" + task.Name
-
-		err = testStore.StoreToken(context.Background(), task.Name, callbackToken)
-		if err != nil {
-			return false, nil, err
-		}
-
-		cbSecretName := fmt.Sprintf("%s-callback-token", task.Name)
-		cbSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      cbSecretName,
-				Namespace: namespace,
-				Labels: map[string]string{
-					"cloudagent.mayurhalai.github.com/task-id": task.Name,
-				},
-			},
-			StringData: map[string]string{
-				"token": callbackToken,
-			},
-		}
-		_, err = fakeK8s.CoreV1().Secrets(namespace).Create(context.Background(), cbSecret, metav1.CreateOptions{})
-		if err != nil {
-			return false, nil, fmt.Errorf("failed to create fake cbSecret in reactor: %w", err)
-		}
-
-		ghSecretName := fmt.Sprintf("%s-github-token", task.Name)
-		ghSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      ghSecretName,
-				Namespace: namespace,
-				Labels: map[string]string{
-					"cloudagent.mayurhalai.github.com/task-id": task.Name,
-				},
-			},
-			StringData: map[string]string{
-				"token": githubToken,
-			},
-		}
-		_, err = fakeK8s.CoreV1().Secrets(namespace).Create(context.Background(), ghSecret, metav1.CreateOptions{})
-		if err != nil {
-			return false, nil, fmt.Errorf("failed to create fake ghSecret in reactor: %w", err)
-		}
-
-		task.Spec.CallbackTokenSecretRef = cbSecretName
-		task.Spec.GitHubTokenSecretRef = ghSecretName
-
-		newUObj, err := v1alpha1.ToUnstructured(task)
-		if err != nil {
-			return false, nil, err
-		}
-
-		*uObj = *newUObj
 		return false, nil, nil
 	})
 	mockGh := &github.MockClient{}
@@ -651,67 +589,6 @@ func TestEndToEndPRTask(t *testing.T) {
 	})
 
 	fakeDyn.PrependReactor("create", "agenttasks", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
-		createAction := action.(clientgotesting.CreateAction)
-		uObj := createAction.GetObject().(*unstructured.Unstructured)
-		task, err := v1alpha1.FromUnstructured(uObj)
-		if err != nil {
-			return false, nil, err
-		}
-
-		// Generate mock tokens to populate secrets for the orchestrator (old flow)
-		githubToken := "mock-github-token"
-		callbackToken := "mock-callback-token-" + task.Name
-
-		err = testStorePR.StoreToken(context.Background(), task.Name, callbackToken)
-		if err != nil {
-			return false, nil, err
-		}
-
-		cbSecretName := fmt.Sprintf("%s-callback-token", task.Name)
-		cbSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      cbSecretName,
-				Namespace: namespace,
-				Labels: map[string]string{
-					"cloudagent.mayurhalai.github.com/task-id": task.Name,
-				},
-			},
-			StringData: map[string]string{
-				"token": callbackToken,
-			},
-		}
-		_, err = fakeK8s.CoreV1().Secrets(namespace).Create(context.Background(), cbSecret, metav1.CreateOptions{})
-		if err != nil {
-			return false, nil, fmt.Errorf("failed to create fake cbSecret in reactor: %w", err)
-		}
-
-		ghSecretName := fmt.Sprintf("%s-github-token", task.Name)
-		ghSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      ghSecretName,
-				Namespace: namespace,
-				Labels: map[string]string{
-					"cloudagent.mayurhalai.github.com/task-id": task.Name,
-				},
-			},
-			StringData: map[string]string{
-				"token": githubToken,
-			},
-		}
-		_, err = fakeK8s.CoreV1().Secrets(namespace).Create(context.Background(), ghSecret, metav1.CreateOptions{})
-		if err != nil {
-			return false, nil, fmt.Errorf("failed to create fake ghSecret in reactor: %w", err)
-		}
-
-		task.Spec.CallbackTokenSecretRef = cbSecretName
-		task.Spec.GitHubTokenSecretRef = ghSecretName
-
-		newUObj, err := v1alpha1.ToUnstructured(task)
-		if err != nil {
-			return false, nil, err
-		}
-
-		*uObj = *newUObj
 		return false, nil, nil
 	})
 	mockGh := &github.MockClient{}
