@@ -15,7 +15,6 @@ import (
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
 	"github.com/mayurhalai/cloud-agent/pkg/github"
 	yaml "gopkg.in/yaml.v3"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -103,6 +102,15 @@ func (s *ListenerServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/callback":
 		s.handleCallback(w, r)
 		return
+	}
+
+	if strings.HasPrefix(u.Path, "/task/") && strings.HasSuffix(u.Path, "/tokens") {
+		parts := strings.Split(u.Path, "/")
+		if len(parts) == 4 && parts[1] == "task" && parts[3] == "tokens" {
+			taskID := parts[2]
+			s.handleGenerateTokens(w, r, taskID)
+			return
+		}
 	}
 
 	http.Error(w, "Not found", http.StatusNotFound)
@@ -198,43 +206,7 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Listener mints a GitHub installation token using its App private key
-	githubToken, err := s.ghClient.MintInstallationToken(repoOwner, repoName)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to mint github token: %v", err), http.StatusInternalServerError)
-		return
-	}
-
 	taskID := fmt.Sprintf("task-%d-%s", event.Issue.Number, generateRandomHex(4))
-
-	callbackToken := generateRandomHex(16)
-
-	// Write Result Callback Token to Redis/TokenStore
-	err = s.tokenStore.StoreToken(r.Context(), taskID, callbackToken)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to store callback token: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Create GitHub Token Secret
-	ghSecretName := fmt.Sprintf("%s-github-token", taskID)
-	ghSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ghSecretName,
-			Namespace: s.namespace,
-			Labels: map[string]string{
-				"cloudagent.mayurhalai.github.com/task-id": taskID,
-			},
-		},
-		StringData: map[string]string{
-			"token": githubToken,
-		},
-	}
-	_, err = s.k8sClient.CoreV1().Secrets(s.namespace).Create(r.Context(), ghSecret, metav1.CreateOptions{})
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to create github token secret: %v", err), http.StatusInternalServerError)
-		return
-	}
 
 	// Parse issue comment/label event information to populate the AgentTask CRD
 	agentTask := &v1alpha1.AgentTask{
@@ -257,7 +229,7 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			SandboxTemplate:        sandboxTemplate,
 			TaskOwner:              taskOwner,
 			TaskOwnerEmail:         taskOwnerEmail,
-			GitHubTokenSecretRef:   ghSecretName,
+			GitHubTokenSecretRef:   "",
 			CallbackTokenSecretRef: "",
 		},
 		Status: v1alpha1.AgentTaskStatus{
@@ -406,4 +378,58 @@ func validateSignature(secret []byte, payload []byte, signatureHeader string) bo
 	expectedMAC := mac.Sum(nil)
 
 	return hmac.Equal(sigBytes, expectedMAC)
+}
+
+type TokenResponse struct {
+	GitHubToken   string `json:"gitHubToken"`
+	CallbackToken string `json:"callbackToken"`
+}
+
+func (s *ListenerServer) handleGenerateTokens(w http.ResponseWriter, r *http.Request, taskID string) {
+	// Fetch AgentTask
+	uTask, err := s.dynClient.Resource(agentTaskGVR).Namespace(s.namespace).Get(r.Context(), taskID, metav1.GetOptions{})
+	if err != nil {
+		http.Error(w, fmt.Sprintf("AgentTask %s not found", taskID), http.StatusNotFound)
+		return
+	}
+
+	task, err := v1alpha1.FromUnstructured(uTask)
+	if err != nil {
+		http.Error(w, "Failed to parse AgentTask", http.StatusInternalServerError)
+		return
+	}
+
+	// Retrieve repository details from annotations
+	repoOwner := task.Annotations["cloudagent.mayurhalai.github.com/repo-owner"]
+	repoName := task.Annotations["cloudagent.mayurhalai.github.com/repo-name"]
+	if repoOwner == "" || repoName == "" {
+		http.Error(w, "Missing repository owner or name annotations", http.StatusBadRequest)
+		return
+	}
+
+	// Mint GitHub installation token using App private key
+	githubToken, err := s.ghClient.MintInstallationToken(repoOwner, repoName)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to mint github token: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Generate Result Callback Token
+	callbackToken := generateRandomHex(16)
+
+	// Write Result Callback Token to Redis/TokenStore
+	err = s.tokenStore.StoreToken(r.Context(), taskID, callbackToken)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to store callback token: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	resp := TokenResponse{
+		GitHubToken:   githubToken,
+		CallbackToken: callbackToken,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
 }

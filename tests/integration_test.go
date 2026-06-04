@@ -98,9 +98,13 @@ func TestEndToEndHelloWorld(t *testing.T) {
 			return false, nil, err
 		}
 
-		token, ok := testStore.GetToken(task.Name)
-		if !ok {
-			return false, nil, fmt.Errorf("token not found in testStore for task %s", task.Name)
+		// Generate mock tokens to populate secrets for the orchestrator (old flow)
+		githubToken := "mock-github-token"
+		callbackToken := "mock-callback-token-" + task.Name
+
+		err = testStore.StoreToken(context.Background(), task.Name, callbackToken)
+		if err != nil {
+			return false, nil, err
 		}
 
 		cbSecretName := fmt.Sprintf("%s-callback-token", task.Name)
@@ -113,7 +117,7 @@ func TestEndToEndHelloWorld(t *testing.T) {
 				},
 			},
 			StringData: map[string]string{
-				"token": token,
+				"token": callbackToken,
 			},
 		}
 		_, err = fakeK8s.CoreV1().Secrets(namespace).Create(context.Background(), cbSecret, metav1.CreateOptions{})
@@ -121,7 +125,27 @@ func TestEndToEndHelloWorld(t *testing.T) {
 			return false, nil, fmt.Errorf("failed to create fake cbSecret in reactor: %w", err)
 		}
 
+		ghSecretName := fmt.Sprintf("%s-github-token", task.Name)
+		ghSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      ghSecretName,
+				Namespace: namespace,
+				Labels: map[string]string{
+					"cloudagent.mayurhalai.github.com/task-id": task.Name,
+				},
+			},
+			StringData: map[string]string{
+				"token": githubToken,
+			},
+		}
+		_, err = fakeK8s.CoreV1().Secrets(namespace).Create(context.Background(), ghSecret, metav1.CreateOptions{})
+		if err != nil {
+			return false, nil, fmt.Errorf("failed to create fake ghSecret in reactor: %w", err)
+		}
+
 		task.Spec.CallbackTokenSecretRef = cbSecretName
+		task.Spec.GitHubTokenSecretRef = ghSecretName
+
 		newUObj, err := v1alpha1.ToUnstructured(task)
 		if err != nil {
 			return false, nil, err
@@ -634,9 +658,13 @@ func TestEndToEndPRTask(t *testing.T) {
 			return false, nil, err
 		}
 
-		token, ok := testStorePR.GetToken(task.Name)
-		if !ok {
-			return false, nil, fmt.Errorf("token not found in testStorePR for task %s", task.Name)
+		// Generate mock tokens to populate secrets for the orchestrator (old flow)
+		githubToken := "mock-github-token"
+		callbackToken := "mock-callback-token-" + task.Name
+
+		err = testStorePR.StoreToken(context.Background(), task.Name, callbackToken)
+		if err != nil {
+			return false, nil, err
 		}
 
 		cbSecretName := fmt.Sprintf("%s-callback-token", task.Name)
@@ -649,7 +677,7 @@ func TestEndToEndPRTask(t *testing.T) {
 				},
 			},
 			StringData: map[string]string{
-				"token": token,
+				"token": callbackToken,
 			},
 		}
 		_, err = fakeK8s.CoreV1().Secrets(namespace).Create(context.Background(), cbSecret, metav1.CreateOptions{})
@@ -657,7 +685,27 @@ func TestEndToEndPRTask(t *testing.T) {
 			return false, nil, fmt.Errorf("failed to create fake cbSecret in reactor: %w", err)
 		}
 
+		ghSecretName := fmt.Sprintf("%s-github-token", task.Name)
+		ghSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      ghSecretName,
+				Namespace: namespace,
+				Labels: map[string]string{
+					"cloudagent.mayurhalai.github.com/task-id": task.Name,
+				},
+			},
+			StringData: map[string]string{
+				"token": githubToken,
+			},
+		}
+		_, err = fakeK8s.CoreV1().Secrets(namespace).Create(context.Background(), ghSecret, metav1.CreateOptions{})
+		if err != nil {
+			return false, nil, fmt.Errorf("failed to create fake ghSecret in reactor: %w", err)
+		}
+
 		task.Spec.CallbackTokenSecretRef = cbSecretName
+		task.Spec.GitHubTokenSecretRef = ghSecretName
+
 		newUObj, err := v1alpha1.ToUnstructured(task)
 		if err != nil {
 			return false, nil, err
@@ -1209,4 +1257,114 @@ func startFakeSandboxController(ctx context.Context, agentsClient agentsv1alpha1
 			}
 		}
 	}()
+}
+
+func TestGenerateTokensEndpoint(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	namespace := "default"
+	scheme := runtime.NewScheme()
+
+	fakeK8s := kubernetesfake.NewSimpleClientset()
+	fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
+		schema.GroupVersionResource{
+			Group:    "cloudagent.mayurhalai.github.com",
+			Version:  "v1alpha1",
+			Resource: "agenttasks",
+		}: "AgentTaskList",
+	})
+	mockGh := &github.MockClient{}
+
+	testStore := webhook.NewInMemoryTokenStore()
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil, testStore)
+	server := httptest.NewServer(listener)
+	defer server.Close()
+
+	taskID := "test-jit-task"
+
+	// 1. Try JIT token generation for non-existent task -> 404
+	resp, err := http.Post(server.URL+"/task/"+taskID+"/tokens", "application/json", nil)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected status 404 for non-existent task, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	// 2. Create the task in dynamic client (missing repo annotations)
+	agentTask := &v1alpha1.AgentTask{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "cloudagent.mayurhalai.github.com/v1alpha1",
+			Kind:       "AgentTask",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskID,
+			Namespace: namespace,
+		},
+		Spec: v1alpha1.AgentTaskSpec{
+			Prompt: "test",
+		},
+	}
+	uTask, err := v1alpha1.ToUnstructured(agentTask)
+	if err != nil {
+		t.Fatalf("Failed to serialize AgentTask: %v", err)
+	}
+	_, err = fakeDyn.Resource(agentTaskGVR).Namespace(namespace).Create(ctx, uTask, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Failed to create AgentTask: %v", err)
+	}
+
+	// JIT call for task with missing annotations -> 400 Bad Request
+	resp, err = http.Post(server.URL+"/task/"+taskID+"/tokens", "application/json", nil)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("Expected status 400 for missing annotations, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	// 3. Update task with valid annotations
+	agentTask.Annotations = map[string]string{
+		"cloudagent.mayurhalai.github.com/repo-owner": "mayurhalai",
+		"cloudagent.mayurhalai.github.com/repo-name":  "cloud-agent",
+	}
+	uTaskUpdated, _ := v1alpha1.ToUnstructured(agentTask)
+	_, err = fakeDyn.Resource(agentTaskGVR).Namespace(namespace).Update(ctx, uTaskUpdated, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("Failed to update AgentTask: %v", err)
+	}
+
+	// 4. JIT call for valid task -> 200 OK and returns tokens
+	resp, err = http.Post(server.URL+"/task/"+taskID+"/tokens", "application/json", nil)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var tokenResp webhook.TokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		t.Fatalf("Failed to decode TokenResponse: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if tokenResp.GitHubToken == "" {
+		t.Errorf("Expected non-empty GitHubToken")
+	}
+	if tokenResp.CallbackToken == "" {
+		t.Errorf("Expected non-empty CallbackToken")
+	}
+
+	// Verify the callback token was stored in TokenStore
+	ok, err := testStore.VerifyToken(ctx, taskID, tokenResp.CallbackToken)
+	if err != nil {
+		t.Fatalf("Failed to verify token: %v", err)
+	}
+	if !ok {
+		t.Errorf("CallbackToken not stored in TokenStore")
+	}
 }
