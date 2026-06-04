@@ -185,7 +185,7 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Webhook Listener fetches `.cloud-agent.yaml` from the repository to read the `SandboxTemplate`
-	sandboxTemplate := "default"
+	sandboxTemplate := "pi-sandbox-template" // TODO: We want to set default to install time choice.
 	configBytes, err := s.ghClient.GetFile(repoOwner, repoName, ".cloud-agent.yaml")
 	if err == nil {
 		var config struct {
@@ -330,8 +330,8 @@ func (s *ListenerServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 
 	authHeader := r.Header.Get("Authorization")
 	var callbackToken string
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		callbackToken = strings.TrimPrefix(authHeader, "Bearer ")
+	if after, ok := strings.CutPrefix(authHeader, "Bearer "); ok {
+		callbackToken = after
 	} else if authHeader != "" {
 		callbackToken = authHeader
 	} else {

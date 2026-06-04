@@ -27,5 +27,10 @@ spec:
             requests:
               cpu: "250m"
               memory: "512Mi"
-              ephemeral-storage: "512Mi"
-          restartPolicy: "Never"
+          restartPolicy: "OnFailure"
+          env:
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agent-secret
+                  key: OPENAI_API_KEY
