@@ -3,3 +3,4 @@ resources:
   - rbac.yaml
   - orchestrator.yaml
   - webhook-listener.yaml
+  - redis.yaml

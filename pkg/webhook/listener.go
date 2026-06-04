@@ -34,15 +34,17 @@ type ListenerServer struct {
 	ghClient      github.Client
 	namespace     string
 	webhookSecret []byte
+	tokenStore    TokenStore
 }
 
-func NewListenerServer(k8sClient kubernetes.Interface, dynClient dynamic.Interface, ghClient github.Client, namespace string, webhookSecret []byte) *ListenerServer {
+func NewListenerServer(k8sClient kubernetes.Interface, dynClient dynamic.Interface, ghClient github.Client, namespace string, webhookSecret []byte, tokenStore TokenStore) *ListenerServer {
 	return &ListenerServer{
 		k8sClient:     k8sClient,
 		dynClient:     dynClient,
 		ghClient:      ghClient,
 		namespace:     namespace,
 		webhookSecret: webhookSecret,
+		tokenStore:    tokenStore,
 	}
 }
 
@@ -207,23 +209,10 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	callbackToken := generateRandomHex(16)
 
-	// Create Callback Token Secret
-	cbSecretName := fmt.Sprintf("%s-callback-token", taskID)
-	cbSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cbSecretName,
-			Namespace: s.namespace,
-			Labels: map[string]string{
-				"cloudagent.mayurhalai.github.com/task-id": taskID,
-			},
-		},
-		StringData: map[string]string{
-			"token": callbackToken,
-		},
-	}
-	_, err = s.k8sClient.CoreV1().Secrets(s.namespace).Create(r.Context(), cbSecret, metav1.CreateOptions{})
+	// Write Result Callback Token to Redis/TokenStore
+	err = s.tokenStore.StoreToken(r.Context(), taskID, callbackToken)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to create callback secret: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to store callback token: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -269,7 +258,7 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			TaskOwner:              taskOwner,
 			TaskOwnerEmail:         taskOwnerEmail,
 			GitHubTokenSecretRef:   ghSecretName,
-			CallbackTokenSecretRef: cbSecretName,
+			CallbackTokenSecretRef: "",
 		},
 		Status: v1alpha1.AgentTaskStatus{
 			State: v1alpha1.StatePending,
@@ -321,13 +310,6 @@ func (s *ListenerServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Fetch Callback Token Secret to verify
-	cbSecret, err := s.k8sClient.CoreV1().Secrets(s.namespace).Get(r.Context(), task.Spec.CallbackTokenSecretRef, metav1.GetOptions{})
-	if err != nil {
-		http.Error(w, "Callback token secret not found or already verified", http.StatusUnauthorized)
-		return
-	}
-
 	authHeader := r.Header.Get("Authorization")
 	var callbackToken string
 	if after, ok := strings.CutPrefix(authHeader, "Bearer "); ok {
@@ -343,22 +325,21 @@ func (s *ListenerServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var storedToken string
-	if len(cbSecret.Data["token"]) > 0 {
-		storedToken = string(cbSecret.Data["token"])
-	} else {
-		storedToken = cbSecret.StringData["token"]
+	// Verify token against TokenStore
+	valid, err := s.tokenStore.VerifyToken(r.Context(), req.TaskName, callbackToken)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to verify callback token: %v", err), http.StatusInternalServerError)
+		return
 	}
-
-	if storedToken != callbackToken {
+	if !valid {
 		http.Error(w, "Invalid callback token", http.StatusUnauthorized)
 		return
 	}
 
-	// Invalidate/delete callback token Secret per ADR 0008
-	err = s.k8sClient.CoreV1().Secrets(s.namespace).Delete(r.Context(), task.Spec.CallbackTokenSecretRef, metav1.DeleteOptions{})
+	// Invalidate/delete callback token from TokenStore
+	err = s.tokenStore.DeleteToken(r.Context(), req.TaskName)
 	if err != nil {
-		http.Error(w, "Failed to invalidate callback token secret", http.StatusInternalServerError)
+		http.Error(w, "Failed to invalidate callback token", http.StatusInternalServerError)
 		return
 	}
 

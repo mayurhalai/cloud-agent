@@ -75,6 +75,8 @@ func TestEndToEndHelloWorld(t *testing.T) {
 		return false, nil, nil
 	})
 
+	testStore := webhook.NewInMemoryTokenStore()
+
 	fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
 		schema.GroupVersionResource{
 			Group:    "cloudagent.mayurhalai.github.com",
@@ -86,6 +88,47 @@ func TestEndToEndHelloWorld(t *testing.T) {
 			Version:  "v1alpha1",
 			Resource: "sandboxclaims",
 		}: "SandboxClaimList",
+	})
+
+	fakeDyn.PrependReactor("create", "agenttasks", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
+		createAction := action.(clientgotesting.CreateAction)
+		uObj := createAction.GetObject().(*unstructured.Unstructured)
+		task, err := v1alpha1.FromUnstructured(uObj)
+		if err != nil {
+			return false, nil, err
+		}
+
+		token, ok := testStore.GetToken(task.Name)
+		if !ok {
+			return false, nil, fmt.Errorf("token not found in testStore for task %s", task.Name)
+		}
+
+		cbSecretName := fmt.Sprintf("%s-callback-token", task.Name)
+		cbSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      cbSecretName,
+				Namespace: namespace,
+				Labels: map[string]string{
+					"cloudagent.mayurhalai.github.com/task-id": task.Name,
+				},
+			},
+			StringData: map[string]string{
+				"token": token,
+			},
+		}
+		_, err = fakeK8s.CoreV1().Secrets(namespace).Create(context.Background(), cbSecret, metav1.CreateOptions{})
+		if err != nil {
+			return false, nil, fmt.Errorf("failed to create fake cbSecret in reactor: %w", err)
+		}
+
+		task.Spec.CallbackTokenSecretRef = cbSecretName
+		newUObj, err := v1alpha1.ToUnstructured(task)
+		if err != nil {
+			return false, nil, err
+		}
+
+		*uObj = *newUObj
+		return false, nil, nil
 	})
 	mockGh := &github.MockClient{}
 	mockGh.SetFile("mayurhalai", "cloud-agent", ".cloud-agent.yaml", []byte("sandboxTemplate: custom-template"))
@@ -254,7 +297,7 @@ fi
 	t.Setenv("TEST_SANDBOX_API_URL", mockSandboxServer.URL)
 
 	// 2. Set up Webhook Listener HTTP Server
-	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil)
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil, testStore)
 	server := httptest.NewServer(listener)
 	defer server.Close()
 
@@ -378,10 +421,9 @@ fi
 		t.Errorf("Expected comment body 'Mock Agent Response', got '%s'", comments[0].Body)
 	}
 
-	// - callback token secret was deleted (invalidated)
-	_, err = fakeK8s.CoreV1().Secrets(namespace).Get(ctx, task.Spec.CallbackTokenSecretRef, metav1.GetOptions{})
-	if err == nil {
-		t.Errorf("Expected callback token secret to be deleted/invalidated")
+	// - callback token was deleted from TokenStore (invalidated)
+	if _, ok := testStore.GetToken(task.Name); ok {
+		t.Errorf("Expected callback token to be deleted/invalidated from TokenStore")
 	}
 
 	// 8. Verify the final task status transitioned to Deleted
@@ -439,7 +481,8 @@ func TestCallbackEndpointAuthentication(t *testing.T) {
 	})
 	mockGh := &github.MockClient{}
 
-	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil)
+	testStore := webhook.NewInMemoryTokenStore()
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil, testStore)
 	server := httptest.NewServer(listener)
 	defer server.Close()
 
@@ -447,16 +490,10 @@ func TestCallbackEndpointAuthentication(t *testing.T) {
 	taskID := "test-callback-task"
 	callbackToken := "super-secret-token"
 
-	cbSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-cb-secret",
-			Namespace: namespace,
-		},
-		StringData: map[string]string{
-			"token": callbackToken,
-		},
+	err := testStore.StoreToken(ctx, taskID, callbackToken)
+	if err != nil {
+		t.Fatalf("Failed to store token: %v", err)
 	}
-	_, err := fakeK8s.CoreV1().Secrets(namespace).Create(ctx, cbSecret, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("Failed to create callback secret: %v", err)
 	}
@@ -574,6 +611,8 @@ func TestEndToEndPRTask(t *testing.T) {
 		return false, nil, nil
 	})
 
+	testStorePR := webhook.NewInMemoryTokenStore()
+
 	fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
 		schema.GroupVersionResource{
 			Group:    "cloudagent.mayurhalai.github.com",
@@ -585,6 +624,47 @@ func TestEndToEndPRTask(t *testing.T) {
 			Version:  "v1alpha1",
 			Resource: "sandboxclaims",
 		}: "SandboxClaimList",
+	})
+
+	fakeDyn.PrependReactor("create", "agenttasks", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
+		createAction := action.(clientgotesting.CreateAction)
+		uObj := createAction.GetObject().(*unstructured.Unstructured)
+		task, err := v1alpha1.FromUnstructured(uObj)
+		if err != nil {
+			return false, nil, err
+		}
+
+		token, ok := testStorePR.GetToken(task.Name)
+		if !ok {
+			return false, nil, fmt.Errorf("token not found in testStorePR for task %s", task.Name)
+		}
+
+		cbSecretName := fmt.Sprintf("%s-callback-token", task.Name)
+		cbSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      cbSecretName,
+				Namespace: namespace,
+				Labels: map[string]string{
+					"cloudagent.mayurhalai.github.com/task-id": task.Name,
+				},
+			},
+			StringData: map[string]string{
+				"token": token,
+			},
+		}
+		_, err = fakeK8s.CoreV1().Secrets(namespace).Create(context.Background(), cbSecret, metav1.CreateOptions{})
+		if err != nil {
+			return false, nil, fmt.Errorf("failed to create fake cbSecret in reactor: %w", err)
+		}
+
+		task.Spec.CallbackTokenSecretRef = cbSecretName
+		newUObj, err := v1alpha1.ToUnstructured(task)
+		if err != nil {
+			return false, nil, err
+		}
+
+		*uObj = *newUObj
+		return false, nil, nil
 	})
 	mockGh := &github.MockClient{}
 	mockGh.SetFile("mayurhalai", "cloud-agent", ".cloud-agent.yaml", []byte("sandboxTemplate: custom-template"))
@@ -749,7 +829,7 @@ echo "https://github.com/mayurhalai/cloud-agent/pull/42"
 	t.Setenv("TEST_SANDBOX_API_URL", mockSandboxServer.URL)
 
 	// 2. Set up Webhook Listener HTTP Server
-	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil)
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil, testStorePR)
 	server := httptest.NewServer(listener)
 	defer server.Close()
 
@@ -897,7 +977,8 @@ func TestLabelOnPRRejected(t *testing.T) {
 	})
 	mockGh := &github.MockClient{}
 
-	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil)
+	testStore := webhook.NewInMemoryTokenStore()
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil, testStore)
 	server := httptest.NewServer(listener)
 	defer server.Close()
 
@@ -985,7 +1066,8 @@ func TestWebhookSignatureValidation(t *testing.T) {
 	mockGh.SetFile("mayurhalai", "cloud-agent", ".cloud-agent.yaml", []byte("sandboxTemplate: default"))
 
 	webhookSecret := []byte("my-super-secret-key")
-	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, webhookSecret)
+	testStore := webhook.NewInMemoryTokenStore()
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, webhookSecret, testStore)
 	server := httptest.NewServer(listener)
 	defer server.Close()
 

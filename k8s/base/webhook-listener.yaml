@@ -40,6 +40,8 @@ spec:
                   optional: true
             - name: GITHUB_APP_PRIVATE_KEY_PATH
               value: /etc/github/private-key.pem
+            - name: REDIS_URL
+              value: redis://redis:6379
           volumeMounts:
             - name: github-app-key
               mountPath: /etc/github

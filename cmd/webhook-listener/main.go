@@ -57,8 +57,22 @@ func main() {
 		ghClient = &github.MockClient{}
 	}
 
+	redisURL := os.Getenv("REDIS_URL")
+	var tokenStore webhook.TokenStore
+	if redisURL != "" {
+		var err error
+		tokenStore, err = webhook.NewRedisTokenStore(redisURL)
+		if err != nil {
+			log.Fatalf("Failed to initialize Redis token store: %v", err)
+		}
+		log.Printf("Using Redis token store connected to %s", redisURL)
+	} else {
+		log.Printf("Warning: REDIS_URL not set. Falling back to InMemoryTokenStore.")
+		tokenStore = webhook.NewInMemoryTokenStore()
+	}
+
 	webhookSecret := os.Getenv("GITHUB_APP_WEBHOOK_SECRET")
-	server := webhook.NewListenerServer(k8sClient, dynClient, ghClient, *namespace, []byte(webhookSecret))
+	server := webhook.NewListenerServer(k8sClient, dynClient, ghClient, *namespace, []byte(webhookSecret), tokenStore)
 
 	addr := fmt.Sprintf(":%d", *port)
 	log.Printf("Starting Webhook Listener on %s", addr)
