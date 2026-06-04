@@ -8,6 +8,10 @@ This context describes the components and concepts for the Cloud Agent system, w
 A Kubernetes Custom Resource representing a unit of work (e.g., answering a question on an issue, or creating a PR) created by the webhook listener.
 _Avoid_: Task, Job, Request
 
+**Task Type**:
+The category of an AgentTask, determining its execution requirements. For example, a `pr` type requires a full `git clone` and attribution setup, whereas a `comment` type might not.
+_Avoid_: Task category, Job type
+
 **Webhook Listener**:
 The component that receives GitHub events, processes them, and creates AgentTasks.
 _Avoid_: GitHub application web-hook listener

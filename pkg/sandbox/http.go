@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -157,21 +158,18 @@ func TaskHandler(w http.ResponseWriter, r *http.Request) {
 		nil,
 	)
 
-	if err := runner.Run(r.Context()); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(TaskResponse{
-			Status:  "error",
-			Message: fmt.Sprintf("Task execution failed: %v", err),
-		})
-		return
-	}
+	go func() {
+		if err := runner.Run(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "Task execution failed: %v\n", err)
+			os.Exit(1)
+		}
+	}()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(TaskResponse{
 		Status:  "success",
-		Message: "Task completed successfully",
+		Message: "Task started successfully",
 	})
 }
 

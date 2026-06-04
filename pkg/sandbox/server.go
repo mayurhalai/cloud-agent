@@ -140,16 +140,15 @@ func (r *Runner) Run(ctx context.Context) error {
 		return nil
 	}
 
-	// 3. Configure Local Git Attribution
-	if err := runGit("config", "user.name", r.taskOwner); err != nil {
-		return err
-	}
-	if err := runGit("config", "user.email", r.taskOwnerEmail); err != nil {
-		return err
-	}
-
-	// 4. Create and Checkout New Branch (PR tasks only)
+	// 3. Configure Local Git Attribution and Branch (PR tasks only)
 	if r.taskType == "pr" {
+		if err := runGit("config", "user.name", r.taskOwner); err != nil {
+			return err
+		}
+		if err := runGit("config", "user.email", r.taskOwnerEmail); err != nil {
+			return err
+		}
+
 		branchName := fmt.Sprintf("attribution-test-%s", r.taskName)
 		if err := runGit("checkout", "-b", branchName); err != nil {
 			return err
@@ -157,7 +156,15 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	// 5. Invoke CLI coding agent binary inside workspace
-	agentCmd := exec.CommandContext(ctx, r.agentBinary, r.prompt)
+	var agentCmd *exec.Cmd
+	switch r.agentBinary {
+	case "pi":
+		agentCmd = exec.CommandContext(ctx, r.agentBinary, "-p", r.prompt)
+	case "opencode":
+		agentCmd = exec.CommandContext(ctx, r.agentBinary, "run", r.prompt)
+	default:
+		agentCmd = exec.CommandContext(ctx, r.agentBinary, r.prompt)
+	}
 	agentCmd.Dir = r.workspaceDir
 	var agentStdout, agentStderr bytes.Buffer
 	agentCmd.Stdout = &agentStdout
