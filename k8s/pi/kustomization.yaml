@@ -4,3 +4,6 @@ resources:
   - sandbox-warmpool.yaml
 
 namespace: cloud-agent
+
+patches:
+  - path: patch-config.yaml

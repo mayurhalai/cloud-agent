@@ -1,5 +1,6 @@
 resources:
   - crds/agenttasks.yaml
+  - config.yaml
   - rbac.yaml
   - orchestrator.yaml
   - webhook-listener.yaml
