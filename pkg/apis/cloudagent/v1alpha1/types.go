@@ -24,6 +24,10 @@ type AgentTaskSpec struct {
 	TaskOwnerEmail         string `json:"taskOwnerEmail,omitempty"`
 	GitHubTokenSecretRef   string `json:"githubTokenSecretRef,omitempty"`
 	CallbackTokenSecretRef string `json:"callbackTokenSecretRef,omitempty"`
+	RepoOwner              string `json:"repoOwner,omitempty"`
+	RepoName               string `json:"repoName,omitempty"`
+	IssueNumber            int    `json:"issueNumber,omitempty"`
+	TaskType               string `json:"taskType,omitempty"`
 }
 
 type AgentTaskStatus struct {

@@ -468,17 +468,15 @@ func TestCallbackEndpointAuthentication(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskID,
 			Namespace: namespace,
-			Annotations: map[string]string{
-				"cloudagent.mayurhalai.github.com/issue-number": "123",
-				"cloudagent.mayurhalai.github.com/repo-owner":   "mayurhalai",
-				"cloudagent.mayurhalai.github.com/repo-name":    "cloud-agent",
-			},
 		},
 		Spec: v1alpha1.AgentTaskSpec{
 			Prompt:                 "test prompt",
 			SandboxTemplate:        "default",
 			GitHubTokenSecretRef:   "dummy-gh-secret",
 			CallbackTokenSecretRef: "test-cb-secret",
+			RepoOwner:              "mayurhalai",
+			RepoName:               "cloud-agent",
+			IssueNumber:            123,
 		},
 	}
 	uTask, err := v1alpha1.ToUnstructured(agentTask)
@@ -834,8 +832,8 @@ echo "https://github.com/mayurhalai/cloud-agent/pull/42"
 		t.Fatalf("Failed to parse AgentTask: %v", err)
 	}
 
-	if task.Annotations["cloudagent.mayurhalai.github.com/task-type"] != "pr" {
-		t.Errorf("Expected task type annotation 'pr', got '%s'", task.Annotations["cloudagent.mayurhalai.github.com/task-type"])
+	if task.Spec.TaskType != "pr" {
+		t.Errorf("Expected task type 'pr', got '%s'", task.Spec.TaskType)
 	}
 
 	// 6. Verify SandboxClaim was created
@@ -1170,7 +1168,7 @@ func TestGenerateTokensEndpoint(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	// 2. Create the task in dynamic client (missing repo annotations)
+	// 2. Create the task in dynamic client (missing repo fields in spec)
 	agentTask := &v1alpha1.AgentTask{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "cloudagent.mayurhalai.github.com/v1alpha1",
@@ -1193,21 +1191,19 @@ func TestGenerateTokensEndpoint(t *testing.T) {
 		t.Fatalf("Failed to create AgentTask: %v", err)
 	}
 
-	// JIT call for task with missing annotations -> 400 Bad Request
+	// JIT call for task with missing spec fields -> 400 Bad Request
 	resp, err = http.Post(server.URL+"/task/"+taskID+"/tokens", "application/json", nil)
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("Expected status 400 for missing annotations, got %d", resp.StatusCode)
+		t.Errorf("Expected status 400 for missing spec fields, got %d", resp.StatusCode)
 	}
 	_ = resp.Body.Close()
 
-	// 3. Update task with valid annotations
-	agentTask.Annotations = map[string]string{
-		"cloudagent.mayurhalai.github.com/repo-owner": "mayurhalai",
-		"cloudagent.mayurhalai.github.com/repo-name":  "cloud-agent",
-	}
+	// 3. Update task with valid spec fields
+	agentTask.Spec.RepoOwner = "mayurhalai"
+	agentTask.Spec.RepoName = "cloud-agent"
 	uTaskUpdated, _ := v1alpha1.ToUnstructured(agentTask)
 	_, err = fakeDyn.Resource(agentTaskGVR).Namespace(namespace).Update(ctx, uTaskUpdated, metav1.UpdateOptions{})
 	if err != nil {

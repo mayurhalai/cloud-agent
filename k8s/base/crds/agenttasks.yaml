@@ -21,9 +21,19 @@ spec:
                   type: string
                 taskOwner:
                   type: string
+                taskOwnerEmail:
+                  type: string
                 githubTokenSecretRef:
                   type: string
                 callbackTokenSecretRef:
+                  type: string
+                repoOwner:
+                  type: string
+                repoName:
+                  type: string
+                issueNumber:
+                  type: integer
+                taskType:
                   type: string
             status:
               type: object

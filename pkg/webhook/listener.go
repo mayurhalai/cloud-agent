@@ -217,12 +217,6 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskID,
 			Namespace: s.namespace,
-			Annotations: map[string]string{
-				"cloudagent.mayurhalai.github.com/issue-number": fmt.Sprintf("%d", event.Issue.Number),
-				"cloudagent.mayurhalai.github.com/repo-owner":   repoOwner,
-				"cloudagent.mayurhalai.github.com/repo-name":    repoName,
-				"cloudagent.mayurhalai.github.com/task-type":    taskType,
-			},
 		},
 		Spec: v1alpha1.AgentTaskSpec{
 			Prompt:                 prompt,
@@ -231,6 +225,10 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			TaskOwnerEmail:         taskOwnerEmail,
 			GitHubTokenSecretRef:   "",
 			CallbackTokenSecretRef: "",
+			RepoOwner:              repoOwner,
+			RepoName:               repoName,
+			IssueNumber:            event.Issue.Number,
+			TaskType:               taskType,
 		},
 		Status: v1alpha1.AgentTaskStatus{
 			State: v1alpha1.StatePending,
@@ -315,15 +313,10 @@ func (s *ListenerServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Retrieve repository details from annotations
-	repoOwner := task.Annotations["cloudagent.mayurhalai.github.com/repo-owner"]
-	repoName := task.Annotations["cloudagent.mayurhalai.github.com/repo-name"]
-	var issueNumber int
-	_, err = fmt.Sscanf(task.Annotations["cloudagent.mayurhalai.github.com/issue-number"], "%d", &issueNumber)
-	if err != nil {
-		http.Error(w, "Invalid issue number annotation", http.StatusInternalServerError)
-		return
-	}
+	// Retrieve repository details from spec
+	repoOwner := task.Spec.RepoOwner
+	repoName := task.Spec.RepoName
+	issueNumber := task.Spec.IssueNumber
 
 	// Post response comment back to GitHub
 	err = s.ghClient.PostComment(repoOwner, repoName, issueNumber, req.Response)
@@ -399,11 +392,11 @@ func (s *ListenerServer) handleGenerateTokens(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Retrieve repository details from annotations
-	repoOwner := task.Annotations["cloudagent.mayurhalai.github.com/repo-owner"]
-	repoName := task.Annotations["cloudagent.mayurhalai.github.com/repo-name"]
+	// Retrieve repository details from spec
+	repoOwner := task.Spec.RepoOwner
+	repoName := task.Spec.RepoName
 	if repoOwner == "" || repoName == "" {
-		http.Error(w, "Missing repository owner or name annotations", http.StatusBadRequest)
+		http.Error(w, "Missing repository owner or name in spec", http.StatusBadRequest)
 		return
 	}
 
