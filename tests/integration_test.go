@@ -25,7 +25,6 @@ import (
 	"github.com/mayurhalai/cloud-agent/pkg/orchestrator"
 	"github.com/mayurhalai/cloud-agent/pkg/sandbox"
 	"github.com/mayurhalai/cloud-agent/pkg/webhook"
-	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -265,6 +264,7 @@ fi
 	defer server.Close()
 
 	t.Setenv("CALLBACK_URL", server.URL+"/callback")
+	t.Setenv("WEBHOOK_LISTENER_URL", server.URL)
 
 	// 3. Start Orchestrator watch loop
 	orch := orchestrator.NewOrchestrator(fakeK8s, fakeDyn, namespace)
@@ -758,6 +758,7 @@ echo "https://github.com/mayurhalai/cloud-agent/pull/42"
 	defer server.Close()
 
 	t.Setenv("CALLBACK_URL", server.URL+"/callback")
+	t.Setenv("WEBHOOK_LISTENER_URL", server.URL)
 
 	// 3. Start Orchestrator watch loop
 	orch := orchestrator.NewOrchestrator(fakeK8s, fakeDyn, namespace)
@@ -1250,16 +1251,8 @@ func TestOrchestratorRetries(t *testing.T) {
 	namespace := "default"
 	scheme := runtime.NewScheme()
 
-	// Create ConfigMap for retries
-	fakeK8s := kubernetesfake.NewSimpleClientset(&corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "cloud-agent-config",
-			Namespace: namespace,
-		},
-		Data: map[string]string{
-			"retry-count": "2",
-		},
-	})
+	fakeK8s := kubernetesfake.NewSimpleClientset()
+	t.Setenv("AGENT_RETRY_COUNT", "2")
 
 	fakeAgentsCS := agentsfake.NewSimpleClientset() //nolint:staticcheck
 	var createdClaims []*extensionsv1alpha1.SandboxClaim
@@ -1321,6 +1314,7 @@ func TestOrchestratorRetries(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("CALLBACK_URL", server.URL+"/callback")
+	t.Setenv("WEBHOOK_LISTENER_URL", server.URL)
 
 	// Start Orchestrator watch loop
 	orch := orchestrator.NewOrchestrator(fakeK8s, fakeDyn, namespace)
