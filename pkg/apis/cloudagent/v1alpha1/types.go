@@ -31,7 +31,8 @@ type AgentTaskSpec struct {
 }
 
 type AgentTaskStatus struct {
-	State AgentTaskState `json:"state,omitempty"`
+	State   AgentTaskState `json:"state,omitempty"`
+	Retries int            `json:"retries,omitempty"`
 }
 
 type AgentTask struct {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
@@ -99,6 +100,46 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 	ctx := context.Background()
 	log.Printf("Starting execution for task %s", task.Name)
 
+	maxRetries := 0
+	cm, err := o.k8sClient.CoreV1().ConfigMaps(o.namespace).Get(ctx, "cloud-agent-config", metav1.GetOptions{})
+	if err == nil {
+		if countStr, ok := cm.Data["retry-count"]; ok {
+			if c, err := strconv.Atoi(countStr); err == nil {
+				maxRetries = c
+			}
+		}
+	}
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		task.Status.Retries = attempt
+		if attempt > 0 {
+			log.Printf("Retrying task %s (attempt %d/%d)", task.Name, attempt, maxRetries)
+			if err := o.updateTaskStatus(ctx, task); err != nil {
+				log.Printf("Failed to update retry status for task %s: %v", task.Name, err)
+			}
+		}
+
+		agentFailed, err := o.executeAttempt(ctx, task)
+		if err == nil {
+			log.Printf("Task %s completed successfully", task.Name)
+			_ = o.updateTaskState(ctx, task, v1alpha1.StateDeleted)
+			return
+		}
+
+		if !agentFailed {
+			log.Printf("Task %s failed due to infrastructure error (will not retry): %v", task.Name, err)
+			_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+			return
+		}
+
+		log.Printf("Task %s execution failed (agent failure): %v", task.Name, err)
+	}
+
+	log.Printf("Task %s failed after exhausting all retries", task.Name)
+	_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+}
+
+func (o *Orchestrator) executeAttempt(ctx context.Context, task *v1alpha1.AgentTask) (bool, error) {
 	opts := agentsandbox.Options{
 		TemplateName: task.Spec.SandboxTemplate,
 		Namespace:    o.namespace,
@@ -112,15 +153,11 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 
 	sb, err := agentsandbox.New(ctx, opts)
 	if err != nil {
-		log.Printf("Failed to create Sandbox instance for task %s: %v", task.Name, err)
-		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
-		return
+		return false, fmt.Errorf("failed to create Sandbox instance: %v", err)
 	}
 
 	if err := sb.Open(ctx); err != nil {
-		log.Printf("Failed to open Sandbox for task %s: %v", task.Name, err)
-		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
-		return
+		return false, fmt.Errorf("failed to open Sandbox: %v", err)
 	}
 	defer func() {
 		if err := sb.Close(ctx); err != nil {
@@ -132,16 +169,12 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 	tokenURL := o.getTokenURL(task.Name)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, nil)
 	if err != nil {
-		log.Printf("Failed to create token request for task %s: %v", task.Name, err)
-		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
-		return
+		return false, fmt.Errorf("failed to create token request: %v", err)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("Failed to request tokens for task %s: %v", task.Name, err)
-		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
-		return
+		return false, fmt.Errorf("failed to request tokens: %v", err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -149,22 +182,17 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<10))
-		log.Printf("Token API returned non-OK status %d for task %s: %s", resp.StatusCode, task.Name, string(bodyBytes))
-		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
-		return
+		return false, fmt.Errorf("token API returned non-OK status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var tokResp tokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tokResp); err != nil {
-		log.Printf("Failed to decode token response for task %s: %v", task.Name, err)
-		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
-		return
+		return false, fmt.Errorf("failed to decode token response: %v", err)
 	}
 
 	// Transition task to StateRunning after receiving tokens
 	if err := o.updateTaskState(ctx, task, v1alpha1.StateRunning); err != nil {
-		log.Printf("Failed to update task state to Running for task %s: %v", task.Name, err)
-		return
+		return false, fmt.Errorf("failed to update task state to Running: %v", err)
 	}
 
 	// Determine target URL for task dispatch
@@ -174,9 +202,7 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 	} else {
 		pod, err := o.k8sClient.CoreV1().Pods(o.namespace).Get(ctx, sb.PodName(), metav1.GetOptions{})
 		if err != nil {
-			log.Printf("Failed to get sandbox pod %s for task %s: %v", sb.PodName(), task.Name, err)
-			_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
-			return
+			return false, fmt.Errorf("failed to get sandbox pod %s: %v", sb.PodName(), err)
 		}
 		targetURL = fmt.Sprintf("http://%s:8080/task", pod.Status.PodIP)
 	}
@@ -200,17 +226,18 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 
 	log.Printf("Executing sandbox-server inside sandbox for task %s", task.Name)
 	if err := sandbox.ExecuteTask(ctx, targetURL, taskReq); err != nil {
-		log.Printf("Failed to execute task %s inside sandbox: %v", task.Name, err)
-		_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
-		return
+		return true, fmt.Errorf("failed to execute task inside sandbox: %v", err)
 	}
 
-	log.Printf("Task %s completed successfully in sandbox", task.Name)
-	_ = o.updateTaskState(ctx, task, v1alpha1.StateDeleted)
+	return false, nil
 }
 
 func (o *Orchestrator) updateTaskState(ctx context.Context, task *v1alpha1.AgentTask, state v1alpha1.AgentTaskState) error {
 	task.Status.State = state
+	return o.updateTaskStatus(ctx, task)
+}
+
+func (o *Orchestrator) updateTaskStatus(ctx context.Context, task *v1alpha1.AgentTask) error {
 	uTask, err := v1alpha1.ToUnstructured(task)
 	if err != nil {
 		return err

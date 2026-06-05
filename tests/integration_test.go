@@ -25,6 +25,7 @@ import (
 	"github.com/mayurhalai/cloud-agent/pkg/orchestrator"
 	"github.com/mayurhalai/cloud-agent/pkg/sandbox"
 	"github.com/mayurhalai/cloud-agent/pkg/webhook"
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -1239,5 +1240,193 @@ func TestGenerateTokensEndpoint(t *testing.T) {
 	}
 	if !ok {
 		t.Errorf("CallbackToken not stored in TokenStore")
+	}
+}
+
+func TestOrchestratorRetries(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	namespace := "default"
+	scheme := runtime.NewScheme()
+
+	// Create ConfigMap for retries
+	fakeK8s := kubernetesfake.NewSimpleClientset(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cloud-agent-config",
+			Namespace: namespace,
+		},
+		Data: map[string]string{
+			"retry-count": "2",
+		},
+	})
+
+	fakeAgentsCS := agentsfake.NewSimpleClientset() //nolint:staticcheck
+	var createdClaims []*extensionsv1alpha1.SandboxClaim
+	var claimsMu sync.Mutex
+
+	fakeExtensionsCS := extensionsfake.NewSimpleClientset() //nolint:staticcheck
+	fakeExtensionsCS.PrependReactor("create", "sandboxclaims", func(action clientgotesting.Action) (handled bool, ret runtime.Object, err error) {
+		createAction := action.(clientgotesting.CreateAction)
+		claim := createAction.GetObject().(*extensionsv1alpha1.SandboxClaim)
+		if claim.Name == "" && claim.GenerateName != "" {
+			claim.Name = claim.GenerateName + "abcde"
+		}
+		claimsMu.Lock()
+		createdClaims = append(createdClaims, claim)
+		claimsMu.Unlock()
+		return false, nil, nil
+	})
+
+	testStore := webhook.NewInMemoryTokenStore()
+
+	fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
+		schema.GroupVersionResource{
+			Group:    "cloudagent.mayurhalai.github.com",
+			Version:  "v1alpha1",
+			Resource: "agenttasks",
+		}: "AgentTaskList",
+		schema.GroupVersionResource{
+			Group:    "extensions.agents.x-k8s.io",
+			Version:  "v1alpha1",
+			Resource: "sandboxclaims",
+		}: "SandboxClaimList",
+	})
+
+	mockGh := &github.MockClient{}
+	mockGh.SetFile("mayurhalai", "cloud-agent", ".cloud-agent.yaml", []byte("sandboxTemplate: custom-template"))
+
+	startFakeSandboxController(ctx, fakeAgentsCS.AgentsV1alpha1(), fakeExtensionsCS.ExtensionsV1alpha1(), namespace)
+
+	// Set up mock Sandbox runtime HTTP server that always returns 500 for /task
+	var executeAttempts int
+	var execMu sync.Mutex
+	mockSandboxServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/task" {
+			execMu.Lock()
+			executeAttempts++
+			execMu.Unlock()
+			http.Error(w, "Simulation of agent execution failure", http.StatusInternalServerError)
+			return
+		}
+		http.Error(w, "Not found", http.StatusNotFound)
+	}))
+	defer mockSandboxServer.Close()
+
+	t.Setenv("TEST_SANDBOX_API_URL", mockSandboxServer.URL)
+
+	// Set up Webhook Listener HTTP Server
+	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil, testStore)
+	server := httptest.NewServer(listener)
+	defer server.Close()
+
+	t.Setenv("CALLBACK_URL", server.URL+"/callback")
+
+	// Start Orchestrator watch loop
+	orch := orchestrator.NewOrchestrator(fakeK8s, fakeDyn, namespace)
+	orch.K8sHelper = &sdk.K8sHelper{
+		AgentsClient:     fakeAgentsCS.AgentsV1alpha1(),
+		ExtensionsClient: fakeExtensionsCS.ExtensionsV1alpha1(),
+		DynamicClient:    fakeDyn,
+		CoreClient:       fakeK8s.CoreV1(),
+		Log: funcr.New(func(prefix, args string) {
+			t.Logf("[SDK] %s: %s", prefix, args)
+		}, funcr.Options{}),
+	}
+
+	go func() {
+		if err := orch.Start(ctx); err != nil && ctx.Err() == nil {
+			t.Errorf("Orchestrator error: %v", err)
+		}
+	}()
+
+	// Send GitHub issue comment webhook event to /webhook
+	payload := map[string]interface{}{
+		"action": "created",
+		"issue": map[string]interface{}{
+			"number": 1,
+			"title":  "Test Issue",
+		},
+		"comment": map[string]interface{}{
+			"body": "cloud-agent answer",
+			"user": map[string]interface{}{
+				"login": "test-owner-user",
+				"id":    123456,
+			},
+		},
+		"repository": map[string]interface{}{
+			"name": "cloud-agent",
+			"owner": map[string]interface{}{
+				"login": "mayurhalai",
+			},
+		},
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Failed to marshal webhook payload: %v", err)
+	}
+
+	resp, err := http.Post(server.URL+"/webhook", "application/json", bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		t.Fatalf("Failed to POST webhook: %v", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("Expected status code 201, got %d", resp.StatusCode)
+	}
+
+	// Verify the AgentTask CRD was created
+	var list *unstructured.UnstructuredList
+	err = pollUntil(ctx, 100*time.Millisecond, func() bool {
+		list, err = fakeDyn.Resource(agentTaskGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+		return err == nil && len(list.Items) == 1
+	})
+	if err != nil {
+		t.Fatalf("AgentTask not created in time: %v", err)
+	}
+
+	taskObj := list.Items[0]
+	taskName := taskObj.GetName()
+
+	// Wait for the task to reach StateFailed
+	err = pollUntil(ctx, 100*time.Millisecond, func() bool {
+		tObj, err := fakeDyn.Resource(agentTaskGVR).Namespace(namespace).Get(ctx, taskName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		task, _ := v1alpha1.FromUnstructured(tObj)
+		return task.Status.State == v1alpha1.StateFailed
+	})
+	if err != nil {
+		t.Fatalf("Task did not transition to Failed state: %v", err)
+	}
+
+	// Fetch final task to verify retries
+	tObj, err := fakeDyn.Resource(agentTaskGVR).Namespace(namespace).Get(ctx, taskName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get final task: %v", err)
+	}
+	finalTask, _ := v1alpha1.FromUnstructured(tObj)
+
+	if finalTask.Status.Retries != 2 {
+		t.Errorf("Expected task.Status.Retries to be 2, got %d", finalTask.Status.Retries)
+	}
+
+	execMu.Lock()
+	attempts := executeAttempts
+	execMu.Unlock()
+	if attempts != 3 {
+		t.Errorf("Expected 3 execution attempts (1 initial + 2 retries), got %d", attempts)
+	}
+
+	claimsMu.Lock()
+	claimsCount := len(createdClaims)
+	claimsMu.Unlock()
+	if claimsCount != 3 {
+		t.Errorf("Expected 3 SandboxClaims to be created (one for each retry attempt), got %d", claimsCount)
 	}
 }

@@ -4,4 +4,3 @@ metadata:
   name: cloud-agent-config
 data:
   retry-count: "2"
-  retry-delay: "10s"
