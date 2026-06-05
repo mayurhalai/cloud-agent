@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
@@ -195,7 +196,18 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Webhook Listener fetches `.cloud-agent.yaml` from the repository to read the `SandboxTemplate`
-	sandboxTemplate := "pi-sandbox-template" // TODO: We want to set default to install time choice.
+	var sandboxTemplate string
+
+	systemAgent := os.Getenv("SYSTEM_AGENT")
+	switch systemAgent {
+	case "pi":
+		sandboxTemplate = "pi-sandbox-template"
+	case "opencode":
+		sandboxTemplate = "opencode-sandbox-template"
+	default:
+		sandboxTemplate = "pi-sandbox-template"
+	}
+
 	configBytes, err := s.ghClient.GetFile(repoOwner, repoName, ".cloud-agent.yaml")
 	if err == nil {
 		var config struct {

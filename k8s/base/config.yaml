@@ -3,4 +3,4 @@ kind: ConfigMap
 metadata:
   name: cloud-agent-config
 data:
-  retry-count: "2"
+  agent-retry-count: "2"

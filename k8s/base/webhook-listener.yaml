@@ -42,6 +42,11 @@ spec:
               value: /etc/github/private-key.pem
             - name: REDIS_URL
               value: redis://redis:6379
+            - name: SYSTEM_AGENT
+              valueFrom:
+                configMapKeyRef:
+                  name: cloud-agent-config
+                  key: system-agent
           volumeMounts:
             - name: github-app-key
               mountPath: /etc/github

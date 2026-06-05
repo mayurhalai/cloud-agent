@@ -3,4 +3,4 @@ kind: ConfigMap
 metadata:
   name: cloud-agent-config
 data:
-  system-agent: "pi-agent"
+  system-agent: "opencode"

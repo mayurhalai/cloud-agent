@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -85,15 +84,8 @@ type tokenResponse struct {
 }
 
 func (o *Orchestrator) getTokenURL(taskID string) string {
-	if urlVal := os.Getenv("WEBHOOK_LISTENER_URL"); urlVal != "" {
-		return fmt.Sprintf("%s/task/%s/tokens", strings.TrimSuffix(urlVal, "/"), taskID)
-	}
-	callbackURL := getEnvWithDefault("CALLBACK_URL", "http://webhook-listener/callback")
-	if u, err := url.Parse(callbackURL); err == nil {
-		u.Path = fmt.Sprintf("/task/%s/tokens", taskID)
-		return u.String()
-	}
-	return fmt.Sprintf("http://webhook-listener/task/%s/tokens", taskID)
+	urlVal := getEnvWithDefault("WEBHOOK_LISTENER_URL", fmt.Sprintf("http://webhook-listener.%s.svc.cluster.local", o.namespace))
+	return fmt.Sprintf("%s/task/%s/tokens", strings.TrimSuffix(urlVal, "/"), taskID)
 }
 
 func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
@@ -101,12 +93,12 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 	log.Printf("Starting execution for task %s", task.Name)
 
 	maxRetries := 0
-	cm, err := o.k8sClient.CoreV1().ConfigMaps(o.namespace).Get(ctx, "cloud-agent-config", metav1.GetOptions{})
-	if err == nil {
-		if countStr, ok := cm.Data["retry-count"]; ok {
-			if c, err := strconv.Atoi(countStr); err == nil {
-				maxRetries = c
-			}
+
+	if retryStr := os.Getenv("AGENT_RETRY_COUNT"); retryStr != "" {
+		if val, err := strconv.Atoi(retryStr); err == nil && val >= 0 {
+			maxRetries = val
+		} else {
+			log.Printf("Invalid AGENT_RETRY_COUNT value '%s', defaulting to 0 retries", retryStr)
 		}
 	}
 
