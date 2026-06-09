@@ -77,12 +77,12 @@ func TestEndToEndHelloWorld(t *testing.T) {
 	testStore := webhook.NewInMemoryTokenStore()
 
 	fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
-		schema.GroupVersionResource{
+		{
 			Group:    "cloudagent.mayurhalai.github.com",
 			Version:  "v1alpha1",
 			Resource: "agenttasks",
 		}: "AgentTaskList",
-		schema.GroupVersionResource{
+		{
 			Group:    "extensions.agents.x-k8s.io",
 			Version:  "v1alpha1",
 			Resource: "sandboxclaims",
@@ -432,7 +432,7 @@ func TestCallbackEndpointAuthentication(t *testing.T) {
 
 	fakeK8s := kubernetesfake.NewSimpleClientset()
 	fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
-		schema.GroupVersionResource{
+		{
 			Group:    "cloudagent.mayurhalai.github.com",
 			Version:  "v1alpha1",
 			Resource: "agenttasks",
@@ -452,9 +452,6 @@ func TestCallbackEndpointAuthentication(t *testing.T) {
 	err := testStore.StoreToken(ctx, taskID, callbackToken)
 	if err != nil {
 		t.Fatalf("Failed to store token: %v", err)
-	}
-	if err != nil {
-		t.Fatalf("Failed to create callback secret: %v", err)
 	}
 
 	agentTask := &v1alpha1.AgentTask{

@@ -54,6 +54,12 @@ func (o *Orchestrator) Reconcile(ctx context.Context, taskName string) error {
 		return fmt.Errorf("failed to parse AgentTask: %v", err)
 	}
 
+	err = o.validateTask(task)
+	if err != nil {
+		log.Printf("Validation failed for task %s: %v", task.Name, err)
+		return o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+	}
+
 	state := task.Status.State
 	if state == "" {
 		state = v1alpha1.StatePending
@@ -75,6 +81,34 @@ func (o *Orchestrator) Reconcile(ctx context.Context, taskName string) error {
 		return o.updateTaskState(ctx, task, v1alpha1.StateDeleted)
 	}
 
+	return nil
+}
+
+func (o *Orchestrator) validateTask(task *v1alpha1.AgentTask) error {
+	// Validate required fields
+	var missing []string
+	if task.Spec.Prompt == "" {
+		missing = append(missing, "prompt")
+	}
+	if task.Spec.RepoOwner == "" {
+		missing = append(missing, "repoOwner")
+	}
+	if task.Spec.RepoName == "" {
+		missing = append(missing, "repoName")
+	}
+	if task.Spec.SandboxTemplate == "" {
+		missing = append(missing, "sandboxTemplate")
+	}
+	if task.Spec.IssueNumber == 0 {
+		missing = append(missing, "issueNumber")
+	}
+	if task.Spec.TaskType == "" {
+		missing = append(missing, "taskType")
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required fields: %v", missing)
+	}
 	return nil
 }
 

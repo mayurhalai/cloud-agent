@@ -8,9 +8,6 @@ kind: Role
 metadata:
   name: webhook-listener-role
 rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["create", "get", "update", "patch", "delete"]
   - apiGroups: ["cloudagent.mayurhalai.github.com"]
     resources: ["agenttasks", "agenttasks/status"]
     verbs: ["create", "get", "update", "patch", "delete"]
@@ -38,7 +35,7 @@ metadata:
   name: sandbox-orchestrator-role
 rules:
   - apiGroups: [""]
-    resources: ["secrets", "pods"]
+    resources: ["pods"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["cloudagent.mayurhalai.github.com"]
     resources: ["agenttasks", "agenttasks/status"]
