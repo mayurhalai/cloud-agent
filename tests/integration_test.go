@@ -194,10 +194,6 @@ fi
 				return
 			}
 
-			// Rewrite relative token paths to absolute paths in tmpDir
-			req.CallbackTokenPath = filepath.Join(tmpDir, req.CallbackTokenPath)
-			req.GitHubTokenPath = filepath.Join(tmpDir, req.GitHubTokenPath)
-
 			// Serialize back to JSON for the handler
 			updatedBody, err := json.Marshal(req)
 			if err != nil {
@@ -471,13 +467,11 @@ func TestCallbackEndpointAuthentication(t *testing.T) {
 			Namespace: namespace,
 		},
 		Spec: v1alpha1.AgentTaskSpec{
-			Prompt:                 "test prompt",
-			SandboxTemplate:        "default",
-			GitHubTokenSecretRef:   "dummy-gh-secret",
-			CallbackTokenSecretRef: "test-cb-secret",
-			RepoOwner:              "mayurhalai",
-			RepoName:               "cloud-agent",
-			IssueNumber:            123,
+			Prompt:          "test prompt",
+			SandboxTemplate: "default",
+			RepoOwner:       "mayurhalai",
+			RepoName:        "cloud-agent",
+			IssueNumber:     123,
 		},
 	}
 	uTask, err := v1alpha1.ToUnstructured(agentTask)
@@ -687,10 +681,6 @@ echo "https://github.com/mayurhalai/cloud-agent/pull/42"
 				http.Error(w, "Missing required fields in TaskRequest", http.StatusBadRequest)
 				return
 			}
-
-			// Rewrite relative token paths to absolute paths in tmpDir
-			req.CallbackTokenPath = filepath.Join(tmpDir, req.CallbackTokenPath)
-			req.GitHubTokenPath = filepath.Join(tmpDir, req.GitHubTokenPath)
 
 			// Serialize back to JSON for the handler
 			updatedBody, err := json.Marshal(req)
