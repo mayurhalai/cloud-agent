@@ -14,7 +14,7 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 kubectl create namespace cloud-agent
 
 # Create secret
-kubectl apply -f /Users/mayurhalai/repos/crap/secrets/github-app-secret.yaml -n cloud-agent
+kubectl apply -f /Users/mayurhalai/repos/crap/secrets/cloud-agent-secret.yaml -n cloud-agent
 
 # Load images
 kind load docker-image webhook-listener:latest --name desktop

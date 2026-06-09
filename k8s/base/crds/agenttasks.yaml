@@ -23,10 +23,6 @@ spec:
                   type: string
                 taskOwnerEmail:
                   type: string
-                githubTokenSecretRef:
-                  type: string
-                callbackTokenSecretRef:
-                  type: string
                 repoOwner:
                   type: string
                 repoName:

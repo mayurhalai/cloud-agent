@@ -200,20 +200,18 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, task *v1alpha1.AgentT
 	}
 
 	taskReq := &sandbox.TaskRequest{
-		TaskName:          task.Name,
-		CallbackURL:       getEnvWithDefault("CALLBACK_URL", "http://webhook-listener/callback"),
-		CallbackTokenPath: "callback-token",
-		GitHubTokenPath:   "github-token",
-		CallbackToken:     tokResp.CallbackToken,
-		GitHubToken:       tokResp.GitHubToken,
-		RepoOwner:         task.Spec.RepoOwner,
-		RepoName:          task.Spec.RepoName,
-		TaskOwner:         task.Spec.TaskOwner,
-		TaskOwnerEmail:    task.Spec.TaskOwnerEmail,
-		WorkspaceDir:      getEnvWithDefault("WORKSPACE_DIR", "/workspace"),
-		TaskType:          task.Spec.TaskType,
-		AgentBinary:       getEnvWithDefault("AGENT_BINARY", "opencode"),
-		Prompt:            task.Spec.Prompt,
+		TaskName:       task.Name,
+		CallbackURL:    getEnvWithDefault("CALLBACK_URL", "http://webhook-listener/callback"),
+		CallbackToken:  tokResp.CallbackToken,
+		GitHubToken:    tokResp.GitHubToken,
+		RepoOwner:      task.Spec.RepoOwner,
+		RepoName:       task.Spec.RepoName,
+		TaskOwner:      task.Spec.TaskOwner,
+		TaskOwnerEmail: task.Spec.TaskOwnerEmail,
+		WorkspaceDir:   getEnvWithDefault("WORKSPACE_DIR", "/workspace"),
+		TaskType:       task.Spec.TaskType,
+		AgentBinary:    getEnvWithDefault("AGENT_BINARY", "opencode"),
+		Prompt:         task.Spec.Prompt,
 	}
 
 	log.Printf("Executing sandbox-server inside sandbox for task %s", task.Name)

@@ -6,25 +6,22 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 )
 
 // TaskRequest defines the JSON payload accepted by the POST /task endpoint.
 type TaskRequest struct {
-	TaskName          string `json:"taskName"`
-	CallbackURL       string `json:"callbackURL"`
-	CallbackTokenPath string `json:"callbackTokenPath,omitempty"`
-	GitHubTokenPath   string `json:"githubTokenPath,omitempty"`
-	CallbackToken     string `json:"callbackToken,omitempty"`
-	GitHubToken       string `json:"githubToken,omitempty"`
-	RepoOwner         string `json:"repoOwner"`
-	RepoName          string `json:"repoName"`
-	TaskOwner         string `json:"taskOwner"`
-	TaskOwnerEmail    string `json:"taskOwnerEmail"`
-	WorkspaceDir      string `json:"workspaceDir,omitempty"`
-	TaskType          string `json:"taskType,omitempty"`
-	AgentBinary       string `json:"agentBinary,omitempty"`
-	Prompt            string `json:"prompt"`
+	TaskName       string `json:"taskName"`
+	CallbackURL    string `json:"callbackURL"`
+	CallbackToken  string `json:"callbackToken,omitempty"`
+	GitHubToken    string `json:"githubToken,omitempty"`
+	RepoOwner      string `json:"repoOwner"`
+	RepoName       string `json:"repoName"`
+	TaskOwner      string `json:"taskOwner"`
+	TaskOwnerEmail string `json:"taskOwnerEmail"`
+	WorkspaceDir   string `json:"workspaceDir,omitempty"`
+	TaskType       string `json:"taskType,omitempty"`
+	AgentBinary    string `json:"agentBinary,omitempty"`
+	Prompt         string `json:"prompt"`
 }
 
 // TaskResponse defines the JSON response returned by the POST /task endpoint.
@@ -64,6 +61,12 @@ func TaskHandler(w http.ResponseWriter, r *http.Request) {
 	if req.CallbackURL == "" {
 		missing = append(missing, "callbackURL")
 	}
+	if req.CallbackToken == "" {
+		missing = append(missing, "callbackToken")
+	}
+	if req.GitHubToken == "" {
+		missing = append(missing, "githubToken")
+	}
 	if req.RepoOwner == "" {
 		missing = append(missing, "repoOwner")
 	}
@@ -90,63 +93,12 @@ func TaskHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write tokens to file if they are passed in the request body
-	if req.CallbackToken != "" {
-		cbPath := req.CallbackTokenPath
-		if cbPath == "" {
-			cbPath = "/etc/cloud-agent/callback-token"
-		}
-		if err := os.MkdirAll(filepath.Dir(cbPath), 0755); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(TaskResponse{
-				Status:  "error",
-				Message: fmt.Sprintf("Failed to create parent directory for callback token: %v", err),
-			})
-			return
-		}
-		if err := os.WriteFile(cbPath, []byte(req.CallbackToken), 0600); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(TaskResponse{
-				Status:  "error",
-				Message: fmt.Sprintf("Failed to write callback token to %s: %v", cbPath, err),
-			})
-			return
-		}
-	}
-
-	if req.GitHubToken != "" {
-		ghPath := req.GitHubTokenPath
-		if ghPath == "" {
-			ghPath = "/etc/github-token/github-token"
-		}
-		if err := os.MkdirAll(filepath.Dir(ghPath), 0755); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(TaskResponse{
-				Status:  "error",
-				Message: fmt.Sprintf("Failed to create parent directory for github token: %v", err),
-			})
-			return
-		}
-		if err := os.WriteFile(ghPath, []byte(req.GitHubToken), 0600); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(TaskResponse{
-				Status:  "error",
-				Message: fmt.Sprintf("Failed to write github token to %s: %v", ghPath, err),
-			})
-			return
-		}
-	}
-
 	// Create and execute the runner
 	runner := NewRunner(
 		req.TaskName,
 		req.CallbackURL,
-		req.CallbackTokenPath,
-		req.GitHubTokenPath,
+		req.CallbackToken,
+		req.GitHubToken,
 		req.RepoOwner,
 		req.RepoName,
 		req.TaskOwner,

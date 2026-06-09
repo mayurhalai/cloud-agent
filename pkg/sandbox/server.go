@@ -13,26 +13,26 @@ import (
 )
 
 type Runner struct {
-	taskName          string
-	callbackURL       string
-	callbackTokenPath string
-	githubTokenPath   string
-	repoOwner         string
-	repoName          string
-	taskOwner         string
-	taskOwnerEmail    string
-	workspaceDir      string
-	taskType          string
-	agentBinary       string
-	prompt            string
-	httpClient        *http.Client
+	taskName       string
+	callbackURL    string
+	callbackToken  string
+	githubToken    string
+	repoOwner      string
+	repoName       string
+	taskOwner      string
+	taskOwnerEmail string
+	workspaceDir   string
+	taskType       string
+	agentBinary    string
+	prompt         string
+	httpClient     *http.Client
 }
 
 func NewRunner(
 	taskName string,
 	callbackURL string,
-	callbackTokenPath string,
-	githubTokenPath string,
+	callbackToken string,
+	githubToken string,
 	repoOwner string,
 	repoName string,
 	taskOwner string,
@@ -46,12 +46,6 @@ func NewRunner(
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	if callbackTokenPath == "" {
-		callbackTokenPath = "/etc/cloud-agent/callback-token"
-	}
-	if githubTokenPath == "" {
-		githubTokenPath = "/etc/github-token/github-token"
-	}
 	if workspaceDir == "" {
 		workspaceDir = "/workspace"
 	}
@@ -62,19 +56,19 @@ func NewRunner(
 		agentBinary = "opencode"
 	}
 	return &Runner{
-		taskName:          taskName,
-		callbackURL:       callbackURL,
-		callbackTokenPath: callbackTokenPath,
-		githubTokenPath:   githubTokenPath,
-		repoOwner:         repoOwner,
-		repoName:          repoName,
-		taskOwner:         taskOwner,
-		taskOwnerEmail:    taskOwnerEmail,
-		workspaceDir:      workspaceDir,
-		taskType:          taskType,
-		agentBinary:       agentBinary,
-		prompt:            prompt,
-		httpClient:        httpClient,
+		taskName:       taskName,
+		callbackURL:    callbackURL,
+		callbackToken:  callbackToken,
+		githubToken:    githubToken,
+		repoOwner:      repoOwner,
+		repoName:       repoName,
+		taskOwner:      taskOwner,
+		taskOwnerEmail: taskOwnerEmail,
+		workspaceDir:   workspaceDir,
+		taskType:       taskType,
+		agentBinary:    agentBinary,
+		prompt:         prompt,
+		httpClient:     httpClient,
 	}
 }
 
@@ -92,21 +86,8 @@ func sanitizeError(err error, token string) error {
 }
 
 func (r *Runner) Run(ctx context.Context) error {
-	// Read callback token from file
-	tokenBytes, err := os.ReadFile(r.callbackTokenPath)
-	if err != nil {
-		return fmt.Errorf("failed to read callback token from %s: %v", r.callbackTokenPath, err)
-	}
-	token := string(bytes.TrimSpace(tokenBytes))
-
-	// Read GitHub token from file
-	var ghToken string
-	ghTokenBytes, err := os.ReadFile(r.githubTokenPath)
-	if err == nil {
-		ghToken = string(bytes.TrimSpace(ghTokenBytes))
-	} else {
-		return fmt.Errorf("failed to read GitHub token from %s: %v", r.githubTokenPath, err)
-	}
+	token := r.callbackToken
+	ghToken := r.githubToken
 
 	// 1. Prepare Workspace Directory
 	if err := os.MkdirAll(r.workspaceDir, 0755); err != nil {

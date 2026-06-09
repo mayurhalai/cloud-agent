@@ -29,8 +29,8 @@ spec:
               memory: "512Mi"
           restartPolicy: "OnFailure"
           env:
-            - name: OPENAI_API_KEY
+            - name: GEMINI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: agent-secret
-                  key: OPENAI_API_KEY
+                  name: cloud-agent-secret
+                  key: GEMINI_API_KEY
