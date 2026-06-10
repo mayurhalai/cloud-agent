@@ -1,0 +1,11 @@
+apiVersion: cloudagent.mayurhalai.github.com/v1alpha1
+kind: AgentTask
+metadata:
+  name: test-agent-task
+spec:
+  prompt: "What kind of information do you suggest to include?"
+  sandboxTemplate: "pi-sandbox-template"
+  repoOwner: "mayurhalai"
+  repoName: "cloud-agent"
+  issueNumber: 8
+  taskType: "comment"
