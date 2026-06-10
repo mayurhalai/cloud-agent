@@ -259,12 +259,9 @@ fi
 	server := httptest.NewServer(listener)
 	defer server.Close()
 
-	t.Setenv("CALLBACK_URL", server.URL+"/callback")
 	t.Setenv("WEBHOOK_LISTENER_URL", server.URL)
 
-	// 3. Start Orchestrator watch loop
-	orch := orchestrator.NewOrchestrator(fakeK8s, fakeDyn, namespace)
-	orch.K8sHelper = &sdk.K8sHelper{
+	mokeK8sHelper := &sdk.K8sHelper{
 		AgentsClient:     fakeAgentsCS.AgentsV1alpha1(),
 		ExtensionsClient: fakeExtensionsCS.ExtensionsV1alpha1(),
 		DynamicClient:    fakeDyn,
@@ -273,6 +270,19 @@ fi
 			t.Logf("[SDK] %s: %s", prefix, args)
 		}, funcr.Options{}),
 	}
+
+	mockSbClient, err := sdk.NewClient(context.Background(), sdk.Options{
+		K8sHelper:    mokeK8sHelper,
+		Namespace:    namespace,
+		TemplateName: "custom-template",
+		APIURL:       mockSandboxServer.URL,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create sandbox client: %v", err)
+	}
+
+	// 3. Start Orchestrator watch loop
+	orch := orchestrator.NewOrchestrator(fakeK8s, fakeDyn, mockSbClient, namespace)
 
 	go func() {
 		if err := orch.Start(ctx); err != nil && ctx.Err() == nil {
@@ -744,12 +754,9 @@ echo "https://github.com/mayurhalai/cloud-agent/pull/42"
 	server := httptest.NewServer(listener)
 	defer server.Close()
 
-	t.Setenv("CALLBACK_URL", server.URL+"/callback")
 	t.Setenv("WEBHOOK_LISTENER_URL", server.URL)
 
-	// 3. Start Orchestrator watch loop
-	orch := orchestrator.NewOrchestrator(fakeK8s, fakeDyn, namespace)
-	orch.K8sHelper = &sdk.K8sHelper{
+	mokeK8sHelper := &sdk.K8sHelper{
 		AgentsClient:     fakeAgentsCS.AgentsV1alpha1(),
 		ExtensionsClient: fakeExtensionsCS.ExtensionsV1alpha1(),
 		DynamicClient:    fakeDyn,
@@ -758,6 +765,19 @@ echo "https://github.com/mayurhalai/cloud-agent/pull/42"
 			t.Logf("[SDK] %s: %s", prefix, args)
 		}, funcr.Options{}),
 	}
+
+	mockSbClient, err := sdk.NewClient(context.Background(), sdk.Options{
+		K8sHelper:    mokeK8sHelper,
+		Namespace:    namespace,
+		TemplateName: "custom-template",
+		APIURL:       mockSandboxServer.URL,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create sandbox client: %v", err)
+	}
+
+	// 3. Start Orchestrator watch loop
+	orch := orchestrator.NewOrchestrator(fakeK8s, fakeDyn, mockSbClient, namespace)
 
 	go func() {
 		if err := orch.Start(ctx); err != nil && ctx.Err() == nil {
@@ -1300,12 +1320,9 @@ func TestOrchestratorRetries(t *testing.T) {
 	server := httptest.NewServer(listener)
 	defer server.Close()
 
-	t.Setenv("CALLBACK_URL", server.URL+"/callback")
 	t.Setenv("WEBHOOK_LISTENER_URL", server.URL)
 
-	// Start Orchestrator watch loop
-	orch := orchestrator.NewOrchestrator(fakeK8s, fakeDyn, namespace)
-	orch.K8sHelper = &sdk.K8sHelper{
+	mokeK8sHelper := &sdk.K8sHelper{
 		AgentsClient:     fakeAgentsCS.AgentsV1alpha1(),
 		ExtensionsClient: fakeExtensionsCS.ExtensionsV1alpha1(),
 		DynamicClient:    fakeDyn,
@@ -1314,6 +1331,19 @@ func TestOrchestratorRetries(t *testing.T) {
 			t.Logf("[SDK] %s: %s", prefix, args)
 		}, funcr.Options{}),
 	}
+
+	mockSbClient, err := sdk.NewClient(context.Background(), sdk.Options{
+		K8sHelper:    mokeK8sHelper,
+		Namespace:    namespace,
+		TemplateName: "custom-template",
+		APIURL:       mockSandboxServer.URL,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create sandbox client: %v", err)
+	}
+
+	// Start Orchestrator watch loop
+	orch := orchestrator.NewOrchestrator(fakeK8s, fakeDyn, mockSbClient, namespace)
 
 	go func() {
 		if err := orch.Start(ctx); err != nil && ctx.Err() == nil {

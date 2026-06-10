@@ -28,17 +28,29 @@ var agentTaskGVR = schema.GroupVersionResource{
 }
 
 type Orchestrator struct {
-	k8sClient kubernetes.Interface
-	dynClient dynamic.Interface
-	namespace string
-	K8sHelper *agentsandbox.K8sHelper
+	k8sClient  kubernetes.Interface
+	dynClient  dynamic.Interface
+	namespace  string
+	sbClient   *agentsandbox.Client
+	maxRetries int // maximum number of times to retry the agent task
 }
 
-func NewOrchestrator(k8sClient kubernetes.Interface, dynClient dynamic.Interface, namespace string) *Orchestrator {
+func NewOrchestrator(k8sClient kubernetes.Interface, dynClient dynamic.Interface, sbClient *agentsandbox.Client, namespace string) *Orchestrator {
+	// Set Agent max retries
+	maxRetries := 0
+	if retryStr := os.Getenv("AGENT_RETRY_COUNT"); retryStr != "" {
+		if val, err := strconv.Atoi(retryStr); err == nil && val >= 0 {
+			maxRetries = val
+		} else {
+			log.Printf("Invalid AGENT_RETRY_COUNT value '%s', defaulting to 0 retries", retryStr)
+		}
+	}
 	return &Orchestrator{
-		k8sClient: k8sClient,
-		dynClient: dynClient,
-		namespace: namespace,
+		k8sClient:  k8sClient,
+		dynClient:  dynClient,
+		sbClient:   sbClient,
+		namespace:  namespace,
+		maxRetries: maxRetries,
 	}
 }
 
@@ -54,12 +66,6 @@ func (o *Orchestrator) Reconcile(ctx context.Context, taskName string) error {
 		return fmt.Errorf("failed to parse AgentTask: %v", err)
 	}
 
-	err = o.validateTask(task)
-	if err != nil {
-		log.Printf("Validation failed for task %s: %v", task.Name, err)
-		return o.updateTaskState(ctx, task, v1alpha1.StateFailed)
-	}
-
 	state := task.Status.State
 	if state == "" {
 		state = v1alpha1.StatePending
@@ -67,9 +73,19 @@ func (o *Orchestrator) Reconcile(ctx context.Context, taskName string) error {
 
 	switch state {
 	case v1alpha1.StatePending:
-		// Transition task to StateStarted before requesting tokens
-		if err := o.updateTaskState(ctx, task, v1alpha1.StateStarted); err != nil {
-			return fmt.Errorf("failed to update task state to Started: %v", err)
+		// Transition task to Pending
+		if err := o.updateTaskState(ctx, task, v1alpha1.StatePending); err != nil {
+			return fmt.Errorf("failed to update task state to Pending: %v", err)
+		}
+		err = o.validateTask(task)
+		if err != nil {
+			log.Printf("Validation failed for task %s: %v", task.Name, err)
+			// TODO: update task with event
+			return nil
+		}
+		// Transition task to Running
+		if err := o.updateTaskState(ctx, task, v1alpha1.StateRunning); err != nil {
+			return fmt.Errorf("failed to update task state to Running: %v", err)
 		}
 
 		// Spawn background goroutine to execute task
@@ -118,7 +134,7 @@ type tokenResponse struct {
 }
 
 func (o *Orchestrator) getTokenURL(taskID string) string {
-	urlVal := getEnvWithDefault("WEBHOOK_LISTENER_URL", fmt.Sprintf("http://webhook-listener.%s.svc.cluster.local", o.namespace))
+	urlVal := o.getWebhookListenerURL()
 	return fmt.Sprintf("%s/task/%s/tokens", strings.TrimSuffix(urlVal, "/"), taskID)
 }
 
@@ -126,20 +142,10 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 	ctx := context.Background()
 	log.Printf("Starting execution for task %s", task.Name)
 
-	maxRetries := 0
-
-	if retryStr := os.Getenv("AGENT_RETRY_COUNT"); retryStr != "" {
-		if val, err := strconv.Atoi(retryStr); err == nil && val >= 0 {
-			maxRetries = val
-		} else {
-			log.Printf("Invalid AGENT_RETRY_COUNT value '%s', defaulting to 0 retries", retryStr)
-		}
-	}
-
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for attempt := 0; attempt <= o.maxRetries; attempt++ {
 		task.Status.Retries = attempt
 		if attempt > 0 {
-			log.Printf("Retrying task %s (attempt %d/%d)", task.Name, attempt, maxRetries)
+			log.Printf("Retrying task %s (attempt %d/%d)", task.Name, attempt, o.maxRetries)
 			if err := o.updateTaskStatus(ctx, task); err != nil {
 				log.Printf("Failed to update retry status for task %s: %v", task.Name, err)
 			}
@@ -166,25 +172,11 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 }
 
 func (o *Orchestrator) executeAttempt(ctx context.Context, task *v1alpha1.AgentTask) (bool, error) {
-	opts := agentsandbox.Options{
-		TemplateName: task.Spec.SandboxTemplate,
-		Namespace:    o.namespace,
-	}
-	if o.K8sHelper != nil {
-		opts.K8sHelper = o.K8sHelper
-	}
-	if testAPIURL := os.Getenv("TEST_SANDBOX_API_URL"); testAPIURL != "" {
-		opts.APIURL = testAPIURL
-	}
-
-	sb, err := agentsandbox.New(ctx, opts)
+	sb, err := o.sbClient.CreateSandbox(ctx, task.Spec.SandboxTemplate, o.namespace)
 	if err != nil {
 		return false, fmt.Errorf("failed to create Sandbox instance: %v", err)
 	}
 
-	if err := sb.Open(ctx); err != nil {
-		return false, fmt.Errorf("failed to open Sandbox: %v", err)
-	}
 	defer func() {
 		if err := sb.Close(ctx); err != nil {
 			log.Printf("Failed to close Sandbox for task %s: %v", task.Name, err)
@@ -235,7 +227,7 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, task *v1alpha1.AgentT
 
 	taskReq := &sandbox.TaskRequest{
 		TaskName:       task.Name,
-		CallbackURL:    getEnvWithDefault("CALLBACK_URL", "http://webhook-listener/callback"),
+		CallbackURL:    o.getWebhookListenerURL() + "/callback",
 		CallbackToken:  tokResp.CallbackToken,
 		GitHubToken:    tokResp.GitHubToken,
 		RepoOwner:      task.Spec.RepoOwner,
@@ -266,11 +258,19 @@ func (o *Orchestrator) updateTaskStatus(ctx context.Context, task *v1alpha1.Agen
 	if err != nil {
 		return err
 	}
-	_, err = o.dynClient.Resource(agentTaskGVR).Namespace(o.namespace).UpdateStatus(ctx, uTask, metav1.UpdateOptions{})
+	updatedUTask, err := o.dynClient.Resource(agentTaskGVR).Namespace(o.namespace).UpdateStatus(ctx, uTask, metav1.UpdateOptions{})
 	if err != nil {
-		_, err = o.dynClient.Resource(agentTaskGVR).Namespace(o.namespace).Update(ctx, uTask, metav1.UpdateOptions{})
+		updatedUTask, err = o.dynClient.Resource(agentTaskGVR).Namespace(o.namespace).Update(ctx, uTask, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
 	}
-	return err
+	updatedTask, err := v1alpha1.FromUnstructured(updatedUTask)
+	if err != nil {
+		return err
+	}
+	*task = *updatedTask
+	return nil
 }
 
 // Start starts the orchestrator controller loop watching for AgentTasks
@@ -301,6 +301,10 @@ func (o *Orchestrator) Start(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (o *Orchestrator) getWebhookListenerURL() string {
+	return getEnvWithDefault("WEBHOOK_LISTENER_URL", fmt.Sprintf("http://webhook-listener.%s.svc.cluster.local:8080", o.namespace))
 }
 
 func getEnvWithDefault(key, defaultVal string) string {
