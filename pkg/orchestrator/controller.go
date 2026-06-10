@@ -162,8 +162,6 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 			_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
 			return
 		}
-
-		log.Printf("Task %s execution failed (agent failure): %v", task.Name, err)
 	}
 
 	log.Printf("Task %s failed after exhausting all retries", task.Name)
