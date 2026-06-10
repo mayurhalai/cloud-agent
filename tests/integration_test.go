@@ -34,7 +34,6 @@ import (
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	clientgotesting "k8s.io/client-go/testing"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
-	sdk "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 	agentsfake "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
 	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1alpha1"
 	extensionsfake "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/fake"
@@ -261,7 +260,7 @@ fi
 
 	t.Setenv("WEBHOOK_LISTENER_URL", server.URL)
 
-	mokeK8sHelper := &sdk.K8sHelper{
+	mokeK8sHelper := &sandbox.K8sHelper{
 		AgentsClient:     fakeAgentsCS.AgentsV1alpha1(),
 		ExtensionsClient: fakeExtensionsCS.ExtensionsV1alpha1(),
 		DynamicClient:    fakeDyn,
@@ -271,11 +270,9 @@ fi
 		}, funcr.Options{}),
 	}
 
-	mockSbClient, err := sdk.NewClient(context.Background(), sdk.Options{
-		K8sHelper:    mokeK8sHelper,
-		Namespace:    namespace,
-		TemplateName: "custom-template",
-		APIURL:       mockSandboxServer.URL,
+	mockSbClient, err := sandbox.NewClient(sandbox.Options{
+		K8sHelper: mokeK8sHelper,
+		APIURL:    mockSandboxServer.URL,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create sandbox client: %v", err)
@@ -756,7 +753,7 @@ echo "https://github.com/mayurhalai/cloud-agent/pull/42"
 
 	t.Setenv("WEBHOOK_LISTENER_URL", server.URL)
 
-	mokeK8sHelper := &sdk.K8sHelper{
+	mokeK8sHelper := &sandbox.K8sHelper{
 		AgentsClient:     fakeAgentsCS.AgentsV1alpha1(),
 		ExtensionsClient: fakeExtensionsCS.ExtensionsV1alpha1(),
 		DynamicClient:    fakeDyn,
@@ -766,11 +763,9 @@ echo "https://github.com/mayurhalai/cloud-agent/pull/42"
 		}, funcr.Options{}),
 	}
 
-	mockSbClient, err := sdk.NewClient(context.Background(), sdk.Options{
-		K8sHelper:    mokeK8sHelper,
-		Namespace:    namespace,
-		TemplateName: "custom-template",
-		APIURL:       mockSandboxServer.URL,
+	mockSbClient, err := sandbox.NewClient(sandbox.Options{
+		K8sHelper: mokeK8sHelper,
+		APIURL:    mockSandboxServer.URL,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create sandbox client: %v", err)
@@ -1107,7 +1102,7 @@ func startFakeSandboxController(ctx context.Context, agentsClient agentsv1alpha1
 									Name:      sbName,
 									Namespace: namespace,
 									Annotations: map[string]string{
-										sdk.PodNameAnnotation: "pod-" + sbName,
+										sandbox.PodNameAnnotation: "pod-" + sbName,
 									},
 								},
 							}
@@ -1322,7 +1317,7 @@ func TestOrchestratorRetries(t *testing.T) {
 
 	t.Setenv("WEBHOOK_LISTENER_URL", server.URL)
 
-	mokeK8sHelper := &sdk.K8sHelper{
+	mokeK8sHelper := &sandbox.K8sHelper{
 		AgentsClient:     fakeAgentsCS.AgentsV1alpha1(),
 		ExtensionsClient: fakeExtensionsCS.ExtensionsV1alpha1(),
 		DynamicClient:    fakeDyn,
@@ -1332,11 +1327,9 @@ func TestOrchestratorRetries(t *testing.T) {
 		}, funcr.Options{}),
 	}
 
-	mockSbClient, err := sdk.NewClient(context.Background(), sdk.Options{
-		K8sHelper:    mokeK8sHelper,
-		Namespace:    namespace,
-		TemplateName: "custom-template",
-		APIURL:       mockSandboxServer.URL,
+	mockSbClient, err := sandbox.NewClient(sandbox.Options{
+		K8sHelper: mokeK8sHelper,
+		APIURL:    mockSandboxServer.URL,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create sandbox client: %v", err)

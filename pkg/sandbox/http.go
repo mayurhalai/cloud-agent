@@ -16,8 +16,8 @@ type TaskRequest struct {
 	GitHubToken    string `json:"githubToken,omitempty"`
 	RepoOwner      string `json:"repoOwner"`
 	RepoName       string `json:"repoName"`
-	TaskOwner      string `json:"taskOwner"`
-	TaskOwnerEmail string `json:"taskOwnerEmail"`
+	TaskOwner      string `json:"taskOwner,omitempty"`
+	TaskOwnerEmail string `json:"taskOwnerEmail,omitempty"`
 	WorkspaceDir   string `json:"workspaceDir,omitempty"`
 	TaskType       string `json:"taskType,omitempty"`
 	AgentBinary    string `json:"agentBinary,omitempty"`
@@ -73,11 +73,16 @@ func TaskHandler(w http.ResponseWriter, r *http.Request) {
 	if req.RepoName == "" {
 		missing = append(missing, "repoName")
 	}
-	if req.TaskOwner == "" {
-		missing = append(missing, "taskOwner")
+	if req.TaskType == "" {
+		missing = append(missing, "taskType")
 	}
-	if req.TaskOwnerEmail == "" {
-		missing = append(missing, "taskOwnerEmail")
+	if req.TaskType == "pr" {
+		if req.TaskOwner == "" {
+			missing = append(missing, "taskOwner")
+		}
+		if req.TaskOwnerEmail == "" {
+			missing = append(missing, "taskOwnerEmail")
+		}
 	}
 	if req.Prompt == "" {
 		missing = append(missing, "prompt")

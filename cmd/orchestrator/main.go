@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -10,10 +11,10 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/mayurhalai/cloud-agent/pkg/orchestrator"
+	"github.com/mayurhalai/cloud-agent/pkg/sandbox"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 )
 
 func main() {
@@ -40,11 +41,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error building k8s helper: %s", err.Error())
 	}
-	sandboxClient, err := sandbox.NewClient(context.Background(), sandbox.Options{
-		Namespace:    *namespace,
-		K8sHelper:    k8sHelper,
-		TemplateName: "pi-sandbox-template",                                                   // This template is not actually in use, but client initialization fails without it
-		APIURL:       "http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080", // Sandbox Router service url
+	sandboxClient, err := sandbox.NewClient(sandbox.Options{
+		K8sHelper: k8sHelper,
+		APIURL:    fmt.Sprintf("http://sandbox-router-svc.%s.svc.cluster.local:8080", *namespace), // Sandbox Router service url
 	})
 	if err != nil {
 		log.Fatalf("Error building sandbox client: %s", err.Error())

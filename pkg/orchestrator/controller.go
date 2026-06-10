@@ -16,9 +16,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	agentsandbox "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 )
 
 var agentTaskGVR = schema.GroupVersionResource{
@@ -31,11 +31,11 @@ type Orchestrator struct {
 	k8sClient  kubernetes.Interface
 	dynClient  dynamic.Interface
 	namespace  string
-	sbClient   *agentsandbox.Client
+	sbClient   *sandbox.Client
 	maxRetries int // maximum number of times to retry the agent task
 }
 
-func NewOrchestrator(k8sClient kubernetes.Interface, dynClient dynamic.Interface, sbClient *agentsandbox.Client, namespace string) *Orchestrator {
+func NewOrchestrator(k8sClient kubernetes.Interface, dynClient dynamic.Interface, sbClient *sandbox.Client, namespace string) *Orchestrator {
 	// Set Agent max retries
 	maxRetries := 0
 	if retryStr := os.Getenv("AGENT_RETRY_COUNT"); retryStr != "" {
@@ -153,8 +153,7 @@ func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
 
 		agentFailed, err := o.executeAttempt(ctx, task)
 		if err == nil {
-			log.Printf("Task %s completed successfully", task.Name)
-			_ = o.updateTaskState(ctx, task, v1alpha1.StateDeleted)
+			log.Printf("Task %s submitted successfully", task.Name)
 			return
 		}
 
@@ -213,18 +212,6 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, task *v1alpha1.AgentT
 		return false, fmt.Errorf("failed to update task state to Running: %v", err)
 	}
 
-	// Determine target URL for task dispatch
-	var targetURL string
-	if testURL := os.Getenv("TEST_SANDBOX_API_URL"); testURL != "" {
-		targetURL = testURL + "/task"
-	} else {
-		pod, err := o.k8sClient.CoreV1().Pods(o.namespace).Get(ctx, sb.PodName(), metav1.GetOptions{})
-		if err != nil {
-			return false, fmt.Errorf("failed to get sandbox pod %s: %v", sb.PodName(), err)
-		}
-		targetURL = fmt.Sprintf("http://%s:8080/task", pod.Status.PodIP)
-	}
-
 	taskReq := &sandbox.TaskRequest{
 		TaskName:       task.Name,
 		CallbackURL:    o.getWebhookListenerURL() + "/callback",
@@ -241,7 +228,7 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, task *v1alpha1.AgentT
 	}
 
 	log.Printf("Executing sandbox-server inside sandbox for task %s", task.Name)
-	if err := sandbox.ExecuteTask(ctx, targetURL, taskReq); err != nil {
+	if err := sb.SubmitTask(ctx, taskReq); err != nil {
 		return true, fmt.Errorf("failed to execute task inside sandbox: %v", err)
 	}
 
@@ -289,7 +276,7 @@ func (o *Orchestrator) Start(ctx context.Context) error {
 			if !ok {
 				return fmt.Errorf("watch channel closed")
 			}
-			if event.Type == "ADDED" || event.Type == "MODIFIED" {
+			if event.Type == watch.Added || event.Type == watch.Modified {
 				uObj, ok := event.Object.(*unstructured.Unstructured)
 				if !ok {
 					continue

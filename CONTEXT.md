@@ -21,8 +21,12 @@ The GitHub integration type used by the Webhook Listener to receive events and a
 _Avoid_: GitHub Client, GitHub App integration
 
 **Orchestrator**:
-The Kubernetes controller that watches AgentTasks, manages warm pools via `sigs.k8s.io/agent-sandbox`, and assigns tasks to sandboxes.
+The Kubernetes controller that watches AgentTasks, manages warm pools via **SandboxClaims**, and assigns tasks to sandboxes.
 _Avoid_: Agent sandbox orchestration controller, Agent orchestrator, agent-sandbox client
+
+**SandboxClaim**:
+A Kubernetes Custom Resource representing a request for a sandbox environment of a specific **SandboxTemplate** type.
+_Avoid_: Sandbox request, claim
 
 **Sandbox Server**:
 The long-running HTTP daemon acting as the entrypoint inside the sandbox container. It exposes a POST endpoint to receive tasks from the Orchestrator, invokes the coding agent, and reports completion. Its Docker image serves as the base image for all SandboxTemplates.
