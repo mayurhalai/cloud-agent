@@ -2,20 +2,17 @@ package orchestrator
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math/rand"
-	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
 	"github.com/mayurhalai/cloud-agent/pkg/sandbox"
+	"github.com/mayurhalai/cloud-agent/pkg/webhook"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,6 +37,7 @@ type Orchestrator struct {
 	maxRetries    int // maximum number of times to retry the agent task
 	activeTasks   map[string]context.CancelFunc
 	activeTasksMu sync.Mutex
+	webhookClient *webhook.Client
 }
 
 func NewOrchestrator(k8sClient kubernetes.Interface, dynClient dynamic.Interface, sbClient *sandbox.Client, namespace string) *Orchestrator {
@@ -52,13 +50,17 @@ func NewOrchestrator(k8sClient kubernetes.Interface, dynClient dynamic.Interface
 			log.Printf("Invalid AGENT_RETRY_COUNT value '%s', defaulting to 0 retries", retryStr)
 		}
 	}
+
+	webhookClient := webhook.NewClient(getWebhookListenerURL(namespace))
+
 	return &Orchestrator{
-		k8sClient:   k8sClient,
-		dynClient:   dynClient,
-		sbClient:    sbClient,
-		namespace:   namespace,
-		maxRetries:  maxRetries,
-		activeTasks: make(map[string]context.CancelFunc),
+		k8sClient:     k8sClient,
+		dynClient:     dynClient,
+		sbClient:      sbClient,
+		namespace:     namespace,
+		maxRetries:    maxRetries,
+		activeTasks:   make(map[string]context.CancelFunc),
+		webhookClient: webhookClient,
 	}
 }
 
@@ -244,16 +246,6 @@ func (o *Orchestrator) validateTask(task *v1alpha1.AgentTask) error {
 	return nil
 }
 
-type tokenResponse struct {
-	GitHubToken   string `json:"gitHubToken"`
-	CallbackToken string `json:"callbackToken"`
-}
-
-func (o *Orchestrator) getTokenURL(taskID string) string {
-	urlVal := o.getWebhookListenerURL()
-	return fmt.Sprintf("%s/task/%s/tokens", strings.TrimSuffix(urlVal, "/"), taskID)
-}
-
 func (o *Orchestrator) recordEvent(ctx context.Context, task *v1alpha1.AgentTask, eventType, reason, message string) {
 	event := &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{
@@ -366,33 +358,14 @@ func (o *Orchestrator) trySubmitToSandbox(ctx context.Context, task *v1alpha1.Ag
 		}
 	}()
 
-	tokenURL := o.getTokenURL(task.Name)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, nil)
+	tokResp, err := o.webhookClient.GenerateTokens(ctx, task.Name)
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to create token request: %w", err)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", "", "", fmt.Errorf("failed to request tokens: %w", err)
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<10))
-		return "", "", "", fmt.Errorf("token API returned status %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	var tokResp tokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokResp); err != nil {
-		return "", "", "", fmt.Errorf("failed to decode token response: %w", err)
+		return "", "", "", fmt.Errorf("failed to generate tokens: %w", err)
 	}
 
 	taskReq := &sandbox.TaskRequest{
 		TaskName:       task.Name,
-		CallbackURL:    o.getWebhookListenerURL() + "/callback",
+		CallbackURL:    getWebhookListenerURL(o.namespace) + "/callback",
 		CallbackToken:  tokResp.CallbackToken,
 		GitHubToken:    tokResp.GitHubToken,
 		RepoOwner:      task.Spec.RepoOwner,
@@ -502,8 +475,8 @@ func (o *Orchestrator) Start(ctx context.Context) error {
 	}
 }
 
-func (o *Orchestrator) getWebhookListenerURL() string {
-	return getEnvWithDefault("WEBHOOK_LISTENER_URL", fmt.Sprintf("http://webhook-listener.%s.svc.cluster.local:8080", o.namespace))
+func getWebhookListenerURL(namespace string) string {
+	return getEnvWithDefault("WEBHOOK_LISTENER_URL", fmt.Sprintf("http://webhook-listener.%s.svc.cluster.local:8080", namespace))
 }
 
 func getEnvWithDefault(key, defaultVal string) string {
