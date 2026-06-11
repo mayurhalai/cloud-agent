@@ -1,4 +1,3 @@
-- Kubernetes should show AgentTask status on `kunectl get agenttasks`.
 - Sandbox-server should not accept more than one task. Once it accepts the task, it should reject new task requests.
 - Sandbox server is not pushing code for PR tasks.
 - We need a way to specify a model for various type of tasks. Either setup wide single model or model per task type. This should come from `cloud-agent-config` configmap. Model value (Or any value) update should be propageted to all components that uses this configmap.

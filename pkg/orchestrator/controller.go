@@ -374,7 +374,7 @@ func (o *Orchestrator) trySubmitToSandbox(ctx context.Context, task *v1alpha1.Ag
 		TaskOwnerEmail: task.Spec.TaskOwnerEmail,
 		WorkspaceDir:   getEnvWithDefault("WORKSPACE_DIR", "/workspace"),
 		TaskType:       task.Spec.TaskType,
-		AgentBinary:    getEnvWithDefault("AGENT_BINARY", "opencode"),
+		AgentBinary:    getEnvWithDefault("SYSTEM_AGENT", "opencode"),
 		Prompt:         task.Spec.Prompt,
 	}
 
