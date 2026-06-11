@@ -18,6 +18,9 @@ RUN npm install -g opencode-ai && \
 # Enter code directory and run agent by default
 WORKDIR /workspace
 
+# Set agent binary
+ENV AGENT_BIN=opencode
+
 # Mendatory to enable sandbox communication to orchestrator
 COPY --from=tools /app/sandbox-server /bin/sandbox-server
 EXPOSE 8888

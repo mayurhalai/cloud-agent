@@ -21,7 +21,6 @@ type TaskRequest struct {
 	TaskOwnerEmail string `json:"taskOwnerEmail,omitempty"`
 	WorkspaceDir   string `json:"workspaceDir,omitempty"`
 	TaskType       string `json:"taskType,omitempty"`
-	AgentBinary    string `json:"agentBinary,omitempty"`
 	Prompt         string `json:"prompt"`
 }
 
@@ -105,7 +104,6 @@ func TaskHandler(c *gin.Context) {
 		req.TaskOwnerEmail,
 		req.WorkspaceDir,
 		req.TaskType,
-		req.AgentBinary,
 		req.Prompt,
 		nil,
 	)

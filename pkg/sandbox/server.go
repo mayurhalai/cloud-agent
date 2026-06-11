@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"os"
@@ -25,7 +26,6 @@ type Runner struct {
 	taskOwnerEmail string
 	workspaceDir   string
 	taskType       string
-	agentBinary    string
 	prompt         string
 	httpClient     *http.Client
 }
@@ -41,7 +41,6 @@ func NewRunner(
 	taskOwnerEmail string,
 	workspaceDir string,
 	taskType string,
-	agentBinary string,
 	prompt string,
 	httpClient *http.Client,
 ) *Runner {
@@ -54,9 +53,6 @@ func NewRunner(
 	if taskType == "" {
 		taskType = "comment"
 	}
-	if agentBinary == "" {
-		agentBinary = "opencode"
-	}
 	return &Runner{
 		taskName:       taskName,
 		callbackURL:    callbackURL,
@@ -68,7 +64,6 @@ func NewRunner(
 		taskOwnerEmail: taskOwnerEmail,
 		workspaceDir:   workspaceDir,
 		taskType:       taskType,
-		agentBinary:    agentBinary,
 		prompt:         prompt,
 		httpClient:     httpClient,
 	}
@@ -138,15 +133,21 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 		}
 	}
 
+	agentBin := os.Getenv("AGENT_BIN")
+	if agentBin == "" {
+		log.Fatalf("AGENT_BIN is not set")
+	}
+
 	// 5. Invoke CLI coding agent binary inside workspace
 	var agentCmd *exec.Cmd
-	switch r.agentBinary {
+	switch agentBin {
 	case "pi":
-		agentCmd = exec.CommandContext(ctx, r.agentBinary, "-p", r.prompt)
+		agentCmd = exec.CommandContext(ctx, agentBin, "-p", r.prompt)
 	case "opencode":
-		agentCmd = exec.CommandContext(ctx, r.agentBinary, "run", r.prompt)
+		agentCmd = exec.CommandContext(ctx, agentBin, "run", r.prompt)
 	default:
-		agentCmd = exec.CommandContext(ctx, r.agentBinary, r.prompt)
+		// Integration testing injects custom agent for testing
+		agentCmd = exec.CommandContext(ctx, agentBin)
 	}
 	agentCmd.Dir = r.workspaceDir
 	var agentStdout, agentStderr bytes.Buffer
@@ -158,7 +159,7 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		}
-		return exitCode, sanitizeError(fmt.Errorf("agent %s failed: %v (stderr: %s)", r.agentBinary, err, agentStderr.String()), ghToken)
+		return exitCode, sanitizeError(fmt.Errorf("agent %s failed: %v (stderr: %s)", agentBin, err, agentStderr.String()), ghToken)
 	}
 
 	responseStr := strings.TrimSpace(agentStdout.String())

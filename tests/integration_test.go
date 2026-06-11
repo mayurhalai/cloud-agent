@@ -153,7 +153,7 @@ fi
 	if err := os.WriteFile(agentPath, []byte(mockAgentScript), 0755); err != nil {
 		t.Fatalf("Failed to write mock agent script: %v", err)
 	}
-	t.Setenv("SYSTEM_AGENT", agentPath)
+	t.Setenv("AGENT_BIN", agentPath)
 
 	// Set up mock Sandbox runtime HTTP server
 	mockSandboxServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -644,7 +644,7 @@ echo "https://github.com/mayurhalai/cloud-agent/pull/42"
 	if err := os.WriteFile(agentPath, []byte(mockAgentScript), 0755); err != nil {
 		t.Fatalf("Failed to write mock agent script: %v", err)
 	}
-	t.Setenv("SYSTEM_AGENT", agentPath)
+	t.Setenv("AGENT_BIN", agentPath)
 
 	// Set up mock Sandbox runtime HTTP server
 	mockSandboxServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
