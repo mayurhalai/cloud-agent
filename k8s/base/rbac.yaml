@@ -37,6 +37,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
   - apiGroups: ["cloudagent.mayurhalai.github.com"]
     resources: ["agenttasks", "agenttasks/status"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -44,7 +47,15 @@ rules:
     resources: ["sandboxes", "sandboxes/status"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxclaims", "sandboxclaims/status", "sandboxtemplates", "sandboxtemplates/status", "sandboxwarmpools", "sandboxwarmpools/status"]
+    resources:
+      [
+        "sandboxclaims",
+        "sandboxclaims/status",
+        "sandboxtemplates",
+        "sandboxtemplates/status",
+        "sandboxwarmpools",
+        "sandboxwarmpools/status",
+      ]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
