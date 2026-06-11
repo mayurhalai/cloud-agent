@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/go-logr/logr/funcr"
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
 	"github.com/mayurhalai/cloud-agent/pkg/github"
@@ -206,7 +207,9 @@ fi
 			newReq.Body = io.NopCloser(bytes.NewReader(updatedBody))
 			newReq.ContentLength = int64(len(updatedBody))
 
-			sandbox.TaskHandler(w, newReq)
+			c, _ := gin.CreateTestContext(w)
+			c.Request = newReq
+			sandbox.TaskHandler(c)
 			return
 		}
 
@@ -695,7 +698,9 @@ echo "https://github.com/mayurhalai/cloud-agent/pull/42"
 			newReq.Body = io.NopCloser(bytes.NewReader(updatedBody))
 			newReq.ContentLength = int64(len(updatedBody))
 
-			sandbox.TaskHandler(w, newReq)
+			c, _ := gin.CreateTestContext(w)
+			c.Request = newReq
+			sandbox.TaskHandler(c)
 			return
 		}
 

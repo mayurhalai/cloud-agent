@@ -2,10 +2,11 @@ package sandbox
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+
+	"github.com/gin-gonic/gin"
 )
 
 // TaskRequest defines the JSON payload accepted by the POST /task endpoint.
@@ -31,11 +32,9 @@ type TaskResponse struct {
 }
 
 // TaskHandler processes task configurations sent to the POST /task endpoint.
-func TaskHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_ = json.NewEncoder(w).Encode(TaskResponse{
+func TaskHandler(c *gin.Context) {
+	if c.Request.Method != http.MethodPost {
+		c.JSON(http.StatusMethodNotAllowed, TaskResponse{
 			Status:  "error",
 			Message: "Method not allowed. Only POST is supported.",
 		})
@@ -43,10 +42,8 @@ func TaskHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req TaskRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(TaskResponse{
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, TaskResponse{
 			Status:  "error",
 			Message: fmt.Sprintf("Failed to decode JSON body: %v", err),
 		})
@@ -89,9 +86,7 @@ func TaskHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(missing) > 0 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(TaskResponse{
+		c.JSON(http.StatusBadRequest, TaskResponse{
 			Status:  "error",
 			Message: fmt.Sprintf("Missing required fields: %v", missing),
 		})
@@ -129,29 +124,23 @@ func TaskHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(TaskResponse{
+	c.JSON(http.StatusOK, TaskResponse{
 		Status:  "success",
 		Message: "Task started successfully",
 	})
 }
 
 // HealthCheckHandler handles health check requests to the GET /health endpoint.
-func HealthCheckHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_ = json.NewEncoder(w).Encode(TaskResponse{
+func HealthCheckHandler(c *gin.Context) {
+	if c.Request.Method != http.MethodGet {
+		c.JSON(http.StatusMethodNotAllowed, TaskResponse{
 			Status:  "error",
 			Message: "Method not allowed. Only GET is supported.",
 		})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(TaskResponse{
+	c.JSON(http.StatusOK, TaskResponse{
 		Status:  "success",
 		Message: "Health check success",
 	})

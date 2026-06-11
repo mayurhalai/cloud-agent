@@ -7,9 +7,19 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 )
 
+func setupTestRouter() *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Any("/task", TaskHandler)
+	return r
+}
+
 func TestTaskHandler_MethodNotAllowed(t *testing.T) {
+	router := setupTestRouter()
 	methods := []string{http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodPatch}
 	for _, method := range methods {
 		t.Run(method, func(t *testing.T) {
@@ -19,8 +29,7 @@ func TestTaskHandler_MethodNotAllowed(t *testing.T) {
 			}
 
 			rr := httptest.NewRecorder()
-			handler := http.HandlerFunc(TaskHandler)
-			handler.ServeHTTP(rr, req)
+			router.ServeHTTP(rr, req)
 
 			if rr.Code != http.StatusMethodNotAllowed {
 				t.Errorf("Expected status %d, got %d", http.StatusMethodNotAllowed, rr.Code)
@@ -42,14 +51,14 @@ func TestTaskHandler_MethodNotAllowed(t *testing.T) {
 }
 
 func TestTaskHandler_InvalidJSON(t *testing.T) {
+	router := setupTestRouter()
 	req, err := http.NewRequest(http.MethodPost, "/task", bytes.NewBufferString("{invalid-json"))
 	if err != nil {
 		t.Fatalf("Failed to create request: %v", err)
 	}
 
 	rr := httptest.NewRecorder()
-	handler := http.HandlerFunc(TaskHandler)
-	handler.ServeHTTP(rr, req)
+	router.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("Expected status %d, got %d", http.StatusBadRequest, rr.Code)
@@ -69,6 +78,7 @@ func TestTaskHandler_InvalidJSON(t *testing.T) {
 }
 
 func TestTaskHandler_MissingFields(t *testing.T) {
+	router := setupTestRouter()
 	tests := []struct {
 		name         string
 		payload      TaskRequest
@@ -239,8 +249,7 @@ func TestTaskHandler_MissingFields(t *testing.T) {
 			}
 
 			rr := httptest.NewRecorder()
-			handler := http.HandlerFunc(TaskHandler)
-			handler.ServeHTTP(rr, req)
+			router.ServeHTTP(rr, req)
 
 			if rr.Code != http.StatusBadRequest {
 				t.Errorf("Expected status %d, got %d", http.StatusBadRequest, rr.Code)
@@ -255,7 +264,7 @@ func TestTaskHandler_MissingFields(t *testing.T) {
 				t.Errorf("Expected status 'error', got %q", resp.Status)
 			}
 			if !strings.Contains(resp.Message, tt.missingField) {
-				t.Errorf("Expected message to mention missing field %q, got %q", tt.missingField, resp.Message)
+				t.Errorf("Expected message to contain %q, got %q", tt.missingField, resp.Message)
 			}
 		})
 	}
