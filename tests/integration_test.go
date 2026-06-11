@@ -25,6 +25,7 @@ import (
 	"github.com/mayurhalai/cloud-agent/pkg/orchestrator"
 	"github.com/mayurhalai/cloud-agent/pkg/sandbox"
 	"github.com/mayurhalai/cloud-agent/pkg/webhook"
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -32,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	clientgotesting "k8s.io/client-go/testing"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	agentsfake "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
@@ -95,7 +97,7 @@ func TestEndToEndHelloWorld(t *testing.T) {
 	mockGh.SetFile("mayurhalai", "cloud-agent", ".cloud-agent.yaml", []byte("sandboxTemplate: custom-template"))
 
 	// Start fake sandbox controller
-	startFakeSandboxController(ctx, fakeAgentsCS.AgentsV1alpha1(), fakeExtensionsCS.ExtensionsV1alpha1(), namespace)
+	startFakeSandboxController(ctx, fakeAgentsCS.AgentsV1alpha1(), fakeExtensionsCS.ExtensionsV1alpha1(), fakeK8s.CoreV1(), namespace)
 
 	// Create temp directories
 	tmpDir, err := os.MkdirTemp("", "sandbox-secret")
@@ -392,17 +394,13 @@ fi
 		t.Errorf("Expected callback token to be deleted/invalidated from TokenStore")
 	}
 
-	// 8. Verify the final task status transitioned to Deleted
+	// 8. Verify the task resource was deleted from the API server
 	err = pollUntil(ctx, 100*time.Millisecond, func() bool {
-		finalTaskObj, err := fakeDyn.Resource(agentTaskGVR).Namespace(namespace).Get(ctx, task.Name, metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		finalTask, _ := v1alpha1.FromUnstructured(finalTaskObj)
-		return finalTask.Status.State == v1alpha1.StateDeleted
+		_, err := fakeDyn.Resource(agentTaskGVR).Namespace(namespace).Get(ctx, task.Name, metav1.GetOptions{})
+		return k8serrors.IsNotFound(err)
 	})
 	if err != nil {
-		t.Fatalf("Task did not transition to Deleted state in time: %v", err)
+		t.Fatalf("Task was not deleted in time: %v", err)
 	}
 
 	// 9. Verify the SandboxClaim was deleted (Closed)
@@ -592,7 +590,7 @@ func TestEndToEndPRTask(t *testing.T) {
 	mockGh.SetFile("mayurhalai", "cloud-agent", ".cloud-agent.yaml", []byte("sandboxTemplate: custom-template"))
 
 	// Start fake sandbox controller
-	startFakeSandboxController(ctx, fakeAgentsCS.AgentsV1alpha1(), fakeExtensionsCS.ExtensionsV1alpha1(), namespace)
+	startFakeSandboxController(ctx, fakeAgentsCS.AgentsV1alpha1(), fakeExtensionsCS.ExtensionsV1alpha1(), fakeK8s.CoreV1(), namespace)
 
 	// Create temp directories
 	tmpDir, err := os.MkdirTemp("", "sandbox-secret-pr")
@@ -1075,7 +1073,7 @@ func TestWebhookSignatureValidation(t *testing.T) {
 	_ = resp.Body.Close()
 }
 
-func startFakeSandboxController(ctx context.Context, agentsClient agentsv1alpha1.AgentsV1alpha1Interface, extensionsClient extensionsclientv1alpha1.ExtensionsV1alpha1Interface, namespace string) {
+func startFakeSandboxController(ctx context.Context, agentsClient agentsv1alpha1.AgentsV1alpha1Interface, extensionsClient extensionsclientv1alpha1.ExtensionsV1alpha1Interface, coreClient corev1client.CoreV1Interface, namespace string) {
 	go func() {
 		ticker := time.NewTicker(20 * time.Millisecond)
 		defer ticker.Stop()
@@ -1107,6 +1105,17 @@ func startFakeSandboxController(ctx context.Context, agentsClient agentsv1alpha1
 								},
 							}
 							_, _ = agentsClient.Sandboxes(namespace).Create(ctx, sb, metav1.CreateOptions{})
+
+							pod := &corev1.Pod{
+								ObjectMeta: metav1.ObjectMeta{
+									Name:      "pod-" + sbName,
+									Namespace: namespace,
+								},
+								Status: corev1.PodStatus{
+									Phase: corev1.PodRunning,
+								},
+							}
+							_, _ = coreClient.Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
 						}
 					}
 				}
@@ -1291,9 +1300,9 @@ func TestOrchestratorRetries(t *testing.T) {
 	mockGh := &github.MockClient{}
 	mockGh.SetFile("mayurhalai", "cloud-agent", ".cloud-agent.yaml", []byte("sandboxTemplate: custom-template"))
 
-	startFakeSandboxController(ctx, fakeAgentsCS.AgentsV1alpha1(), fakeExtensionsCS.ExtensionsV1alpha1(), namespace)
+	startFakeSandboxController(ctx, fakeAgentsCS.AgentsV1alpha1(), fakeExtensionsCS.ExtensionsV1alpha1(), fakeK8s.CoreV1(), namespace)
 
-	// Set up mock Sandbox runtime HTTP server that always returns 500 for /task
+	// Set up mock Sandbox runtime HTTP server that always returns 200 OK for /task
 	var executeAttempts int
 	var execMu sync.Mutex
 	mockSandboxServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1301,7 +1310,8 @@ func TestOrchestratorRetries(t *testing.T) {
 			execMu.Lock()
 			executeAttempts++
 			execMu.Unlock()
-			http.Error(w, "Simulation of agent execution failure", http.StatusInternalServerError)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Task accepted"})
 			return
 		}
 		http.Error(w, "Not found", http.StatusNotFound)
@@ -1309,6 +1319,47 @@ func TestOrchestratorRetries(t *testing.T) {
 	defer mockSandboxServer.Close()
 
 	t.Setenv("TEST_SANDBOX_API_URL", mockSandboxServer.URL)
+
+	// background goroutine to simulate pod termination with non-zero exit code
+	go func() {
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				list, err := fakeDyn.Resource(agentTaskGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+				if err != nil {
+					continue
+				}
+				for _, item := range list.Items {
+					task, err := v1alpha1.FromUnstructured(&item)
+					if err != nil {
+						continue
+					}
+					if task.Status.State == v1alpha1.StateRunning && task.Status.PodName != "" {
+						pod, err := fakeK8s.CoreV1().Pods(namespace).Get(ctx, task.Status.PodName, metav1.GetOptions{})
+						if err == nil && len(pod.Status.ContainerStatuses) == 0 {
+							pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+								{
+									Name: "pi-agent",
+									State: corev1.ContainerState{
+										Terminated: &corev1.ContainerStateTerminated{
+											ExitCode: 1,
+										},
+									},
+								},
+							}
+							_, _ = fakeK8s.CoreV1().Pods(namespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{})
+							// Trigger a modified event on the pod by updating it
+							_, _ = fakeK8s.CoreV1().Pods(namespace).Update(ctx, pod, metav1.UpdateOptions{})
+						}
+					}
+				}
+			}
+		}
+	}()
 
 	// Set up Webhook Listener HTTP Server
 	listener := webhook.NewListenerServer(fakeK8s, fakeDyn, mockGh, namespace, nil, testStore)

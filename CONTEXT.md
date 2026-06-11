@@ -5,8 +5,14 @@ This context describes the components and concepts for the Cloud Agent system, w
 ## Language
 
 **AgentTask**:
-A Kubernetes Custom Resource representing a unit of work (e.g., answering a question on an issue, or creating a PR) created by the webhook listener.
+A Kubernetes Custom Resource representing a unit of work (e.g., answering a question on an issue, or creating a PR) created by the webhook listener. It transitions through the following lifecycle phases:
+- **Pending**: Initial state. The task is validated before proceeding.
+- **Started**: The task is submitting its request to the sandbox.
+- **Running**: The task is executing inside the sandbox while the sandbox pod is monitored.
+- **Completed**: The task successfully executed, closed the sandbox, and is slated for deletion.
+- **Failed**: The task execution or sandbox creation failed and is retried up to the maximum limit.
 _Avoid_: Task, Job, Request
+
 
 **Task Type**:
 The category of an AgentTask, determining its execution requirements. For example, a `pr` type requires a full `git clone` and attribution setup, whereas a `comment` type might not.

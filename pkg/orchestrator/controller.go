@@ -6,13 +6,18 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
 	"github.com/mayurhalai/cloud-agent/pkg/sandbox"
+	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -28,11 +33,13 @@ var agentTaskGVR = schema.GroupVersionResource{
 }
 
 type Orchestrator struct {
-	k8sClient  kubernetes.Interface
-	dynClient  dynamic.Interface
-	namespace  string
-	sbClient   *sandbox.Client
-	maxRetries int // maximum number of times to retry the agent task
+	k8sClient     kubernetes.Interface
+	dynClient     dynamic.Interface
+	namespace     string
+	sbClient      *sandbox.Client
+	maxRetries    int // maximum number of times to retry the agent task
+	activeTasks   map[string]context.CancelFunc
+	activeTasksMu sync.Mutex
 }
 
 func NewOrchestrator(k8sClient kubernetes.Interface, dynClient dynamic.Interface, sbClient *sandbox.Client, namespace string) *Orchestrator {
@@ -46,11 +53,12 @@ func NewOrchestrator(k8sClient kubernetes.Interface, dynClient dynamic.Interface
 		}
 	}
 	return &Orchestrator{
-		k8sClient:  k8sClient,
-		dynClient:  dynClient,
-		sbClient:   sbClient,
-		namespace:  namespace,
-		maxRetries: maxRetries,
+		k8sClient:   k8sClient,
+		dynClient:   dynClient,
+		sbClient:    sbClient,
+		namespace:   namespace,
+		maxRetries:  maxRetries,
+		activeTasks: make(map[string]context.CancelFunc),
 	}
 }
 
@@ -58,6 +66,9 @@ func NewOrchestrator(k8sClient kubernetes.Interface, dynClient dynamic.Interface
 func (o *Orchestrator) Reconcile(ctx context.Context, taskName string) error {
 	uTask, err := o.dynClient.Resource(agentTaskGVR).Namespace(o.namespace).Get(ctx, taskName, metav1.GetOptions{})
 	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil
+		}
 		return fmt.Errorf("failed to get AgentTask: %v", err)
 	}
 
@@ -69,32 +80,137 @@ func (o *Orchestrator) Reconcile(ctx context.Context, taskName string) error {
 	state := task.Status.State
 	if state == "" {
 		state = v1alpha1.StatePending
+		if err := o.updateTaskState(ctx, task, v1alpha1.StatePending); err != nil {
+			return fmt.Errorf("failed to initialize task state to Pending: %v", err)
+		}
 	}
 
 	switch state {
 	case v1alpha1.StatePending:
-		// Transition task to Pending
-		if err := o.updateTaskState(ctx, task, v1alpha1.StatePending); err != nil {
-			return fmt.Errorf("failed to update task state to Pending: %v", err)
-		}
 		err = o.validateTask(task)
 		if err != nil {
 			log.Printf("Validation failed for task %s: %v", task.Name, err)
-			// TODO: update task with event
+			o.recordEvent(ctx, task, "Warning", "ValidationFailed", err.Error())
 			return nil
 		}
-		// Transition task to Running
-		if err := o.updateTaskState(ctx, task, v1alpha1.StateRunning); err != nil {
-			return fmt.Errorf("failed to update task state to Running: %v", err)
+		// Transition task to Started
+		if err := o.updateTaskState(ctx, task, v1alpha1.StateStarted); err != nil {
+			return fmt.Errorf("failed to update task state to Started: %v", err)
+		}
+		return nil
+
+	case v1alpha1.StateStarted:
+		o.activeTasksMu.Lock()
+		_, active := o.activeTasks[task.Name]
+		o.activeTasksMu.Unlock()
+		if !active {
+			runCtx, cancel := context.WithCancel(context.Background())
+			o.activeTasksMu.Lock()
+			o.activeTasks[task.Name] = cancel
+			o.activeTasksMu.Unlock()
+
+			go o.runSandboxSubmission(runCtx, task.Name)
+		}
+		return nil
+
+	case v1alpha1.StateRunning:
+		if task.Status.PodName == "" {
+			return nil
+		}
+		pod, err := o.k8sClient.CoreV1().Pods(o.namespace).Get(ctx, task.Status.PodName, metav1.GetOptions{})
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				log.Printf("Pod %s not found for running task %s", task.Status.PodName, task.Name)
+				o.recordEvent(ctx, task, "Warning", "PodNotFound", fmt.Sprintf("Sandbox pod %s was not found", task.Status.PodName))
+				if err := o.updateTaskState(ctx, task, v1alpha1.StateFailed); err != nil {
+					return fmt.Errorf("failed to update task status to Failed: %v", err)
+				}
+				return nil
+			}
+			return fmt.Errorf("failed to get pod %s: %v", task.Status.PodName, err)
 		}
 
-		// Spawn background goroutine to execute task
-		go o.executeTask(task)
+		terminated := false
+		var exitCode int32
+		for _, status := range pod.Status.ContainerStatuses {
+			if status.State.Terminated != nil {
+				terminated = true
+				exitCode = status.State.Terminated.ExitCode
+				break
+			}
+		}
+
+		if terminated {
+			if exitCode == 0 {
+				log.Printf("Pod %s terminated successfully with exit code 0", task.Status.PodName)
+				if err := o.updateTaskState(ctx, task, v1alpha1.StateCompleted); err != nil {
+					return fmt.Errorf("failed to update task %s state to Completed: %v", task.Name, err)
+				}
+			} else {
+				log.Printf("Pod %s terminated with exit code %d", task.Status.PodName, exitCode)
+				o.recordEvent(ctx, task, "Warning", "PodTerminatedWithFailure", fmt.Sprintf("Sandbox pod terminated with exit code %d", exitCode))
+				if err := o.updateTaskState(ctx, task, v1alpha1.StateFailed); err != nil {
+					return fmt.Errorf("failed to update task %s state to Failed: %v", task.Name, err)
+				}
+			}
+		} else if pod.Status.Phase == corev1.PodSucceeded {
+			log.Printf("Pod %s succeeded", task.Status.PodName)
+			if err := o.updateTaskState(ctx, task, v1alpha1.StateCompleted); err != nil {
+				return fmt.Errorf("failed to update task %s state to Completed: %v", task.Name, err)
+			}
+		} else if pod.Status.Phase == corev1.PodFailed {
+			log.Printf("Pod %s failed", task.Status.PodName)
+			o.recordEvent(ctx, task, "Warning", "PodFailed", "Sandbox pod failed")
+			if err := o.updateTaskState(ctx, task, v1alpha1.StateFailed); err != nil {
+				return fmt.Errorf("failed to update task %s state to Failed: %v", task.Name, err)
+			}
+		}
 		return nil
 
 	case v1alpha1.StateCompleted:
-		// Mark state as Deleted
-		return o.updateTaskState(ctx, task, v1alpha1.StateDeleted)
+		if task.Status.SandboxClaimName != "" {
+			sb := o.sbClient.GetSandbox(task.Status.SandboxClaimName, task.Status.SandboxName, task.Status.PodName, task.Namespace)
+			if err := sb.Close(ctx); err != nil {
+				log.Printf("Failed to close Sandbox for task %s: %v", task.Name, err)
+				o.recordEvent(ctx, task, "Warning", "SandboxCloseFailed", err.Error())
+				return fmt.Errorf("failed to close sandbox: %v", err)
+			}
+		}
+		log.Printf("Deleting completed task %s", task.Name)
+		err := o.dynClient.Resource(agentTaskGVR).Namespace(task.Namespace).Delete(ctx, task.Name, metav1.DeleteOptions{})
+		if err != nil && !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete completed task: %v", err)
+		}
+		return nil
+
+	case v1alpha1.StateFailed:
+		if task.Status.SandboxClaimName != "" {
+			sb := o.sbClient.GetSandbox(task.Status.SandboxClaimName, task.Status.SandboxName, task.Status.PodName, task.Namespace)
+			if err := sb.Close(ctx); err != nil {
+				log.Printf("Failed to close Sandbox for failed task %s: %v", task.Name, err)
+				o.recordEvent(ctx, task, "Warning", "SandboxCloseFailed", err.Error())
+				return fmt.Errorf("failed to close sandbox: %v", err)
+			}
+			task.Status.SandboxClaimName = ""
+			task.Status.SandboxName = ""
+			task.Status.PodName = ""
+			if err := o.updateTaskStatus(ctx, task); err != nil {
+				return fmt.Errorf("failed to update status after closing sandbox: %v", err)
+			}
+		}
+
+		if task.Status.Retries < o.maxRetries {
+			task.Status.Retries++
+			task.Status.State = v1alpha1.StateStarted
+			log.Printf("Retrying failed task %s (attempt %d/%d)", task.Name, task.Status.Retries, o.maxRetries)
+			if err := o.updateTaskStatus(ctx, task); err != nil {
+				return fmt.Errorf("failed to transition task to Started state: %v", err)
+			}
+		} else {
+			log.Printf("Task %s failed after exhausting all retries", task.Name)
+			o.recordEvent(ctx, task, "Warning", "RetriesExhausted", fmt.Sprintf("Task failed after exhausting %d retries", o.maxRetries))
+		}
+		return nil
 	}
 
 	return nil
@@ -138,58 +254,127 @@ func (o *Orchestrator) getTokenURL(taskID string) string {
 	return fmt.Sprintf("%s/task/%s/tokens", strings.TrimSuffix(urlVal, "/"), taskID)
 }
 
-func (o *Orchestrator) executeTask(task *v1alpha1.AgentTask) {
-	ctx := context.Background()
-	log.Printf("Starting execution for task %s", task.Name)
-
-	for attempt := 0; attempt <= o.maxRetries; attempt++ {
-		task.Status.Retries = attempt
-		if attempt > 0 {
-			log.Printf("Retrying task %s (attempt %d/%d)", task.Name, attempt, o.maxRetries)
-			if err := o.updateTaskStatus(ctx, task); err != nil {
-				log.Printf("Failed to update retry status for task %s: %v", task.Name, err)
-			}
-		}
-
-		agentFailed, err := o.executeAttempt(ctx, task)
-		if err == nil {
-			log.Printf("Task %s submitted successfully", task.Name)
-			return
-		}
-
-		if !agentFailed {
-			log.Printf("Task %s failed due to infrastructure error (will not retry): %v", task.Name, err)
-			_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
-			return
-		}
+func (o *Orchestrator) recordEvent(ctx context.Context, task *v1alpha1.AgentTask, eventType, reason, message string) {
+	event := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: task.Name + "-event-",
+			Namespace:    task.Namespace,
+		},
+		InvolvedObject: corev1.ObjectReference{
+			APIVersion: "cloudagent.mayurhalai.github.com/v1alpha1",
+			Kind:       "AgentTask",
+			Name:       task.Name,
+			Namespace:  task.Namespace,
+			UID:        task.UID,
+		},
+		Reason:  reason,
+		Message: message,
+		Type:    eventType,
+		Source: corev1.EventSource{
+			Component: "cloud-agent-orchestrator",
+		},
+		FirstTimestamp: metav1.Now(),
+		LastTimestamp:  metav1.Now(),
+		Count:          1,
 	}
-
-	log.Printf("Task %s failed after exhausting all retries", task.Name)
-	_ = o.updateTaskState(ctx, task, v1alpha1.StateFailed)
+	_, err := o.k8sClient.CoreV1().Events(task.Namespace).Create(ctx, event, metav1.CreateOptions{})
+	if err != nil {
+		log.Printf("Failed to record event for task %s: %v", task.Name, err)
+	}
 }
 
-func (o *Orchestrator) executeAttempt(ctx context.Context, task *v1alpha1.AgentTask) (bool, error) {
+func (o *Orchestrator) runSandboxSubmission(ctx context.Context, taskName string) {
+	defer func() {
+		o.activeTasksMu.Lock()
+		if cancel, ok := o.activeTasks[taskName]; ok {
+			cancel()
+			delete(o.activeTasks, taskName)
+		}
+		o.activeTasksMu.Unlock()
+	}()
+
+	backoff := 1 * time.Second
+	maxBackoff := 10 * time.Second
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		uTask, err := o.dynClient.Resource(agentTaskGVR).Namespace(o.namespace).Get(ctx, taskName, metav1.GetOptions{})
+		if err != nil {
+			log.Printf("Failed to get task %s in submission loop: %v", taskName, err)
+			return
+		}
+		task, err := v1alpha1.FromUnstructured(uTask)
+		if err != nil {
+			log.Printf("Failed to parse task %s in submission loop: %v", taskName, err)
+			return
+		}
+
+		if task.Status.State != v1alpha1.StateStarted {
+			return
+		}
+
+		sandboxClaimName, sandboxName, podName, err := o.trySubmitToSandbox(ctx, task)
+		if err == nil {
+			task.Status.State = v1alpha1.StateRunning
+			task.Status.SandboxClaimName = sandboxClaimName
+			task.Status.SandboxName = sandboxName
+			task.Status.PodName = podName
+			if err := o.updateTaskStatus(ctx, task); err != nil {
+				log.Printf("Failed to update task %s status to Running: %v", taskName, err)
+			}
+			return
+		}
+
+		log.Printf("Sandbox submission failed for task %s: %v", taskName, err)
+		o.recordEvent(ctx, task, "Warning", "SandboxSubmissionFailed", err.Error())
+
+		jitter := time.Duration(rand.Int63n(int64(backoff)))
+		sleepTime := backoff + jitter
+		if sleepTime > maxBackoff {
+			sleepTime = maxBackoff
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(sleepTime):
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
+func (o *Orchestrator) trySubmitToSandbox(ctx context.Context, task *v1alpha1.AgentTask) (string, string, string, error) {
 	sb, err := o.sbClient.CreateSandbox(ctx, task.Spec.SandboxTemplate, o.namespace)
 	if err != nil {
-		return false, fmt.Errorf("failed to create Sandbox instance: %v", err)
+		return "", "", "", fmt.Errorf("failed to create sandbox: %w", err)
 	}
 
+	closeFailed := false
 	defer func() {
-		if err := sb.Close(ctx); err != nil {
-			log.Printf("Failed to close Sandbox for task %s: %v", task.Name, err)
+		if err != nil {
+			if closeErr := sb.Close(ctx); closeErr != nil {
+				closeFailed = true
+				log.Printf("Failed to close sandbox during cleanup: %v", closeErr)
+			}
 		}
 	}()
 
-	// Call Webhook Listener JIT API to fetch tokens
 	tokenURL := o.getTokenURL(task.Name)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, nil)
 	if err != nil {
-		return false, fmt.Errorf("failed to create token request: %v", err)
+		return "", "", "", fmt.Errorf("failed to create token request: %w", err)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("failed to request tokens: %v", err)
+		return "", "", "", fmt.Errorf("failed to request tokens: %w", err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -197,17 +382,12 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, task *v1alpha1.AgentT
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<10))
-		return false, fmt.Errorf("token API returned non-OK status %d: %s", resp.StatusCode, string(bodyBytes))
+		return "", "", "", fmt.Errorf("token API returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var tokResp tokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tokResp); err != nil {
-		return false, fmt.Errorf("failed to decode token response: %v", err)
-	}
-
-	// Transition task to StateRunning after receiving tokens
-	if err := o.updateTaskState(ctx, task, v1alpha1.StateRunning); err != nil {
-		return false, fmt.Errorf("failed to update task state to Running: %v", err)
+		return "", "", "", fmt.Errorf("failed to decode token response: %w", err)
 	}
 
 	taskReq := &sandbox.TaskRequest{
@@ -225,12 +405,14 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, task *v1alpha1.AgentT
 		Prompt:         task.Spec.Prompt,
 	}
 
-	log.Printf("Executing sandbox-server inside sandbox for task %s", task.Name)
 	if err := sb.SubmitTask(ctx, taskReq); err != nil {
-		return true, fmt.Errorf("failed to execute task inside sandbox: %v", err)
+		if closeFailed {
+			o.recordEvent(ctx, task, "Warning", "SandboxCloseFailed", "Failed to close sandbox during cleanup")
+		}
+		return "", "", "", fmt.Errorf("failed to execute task inside sandbox: %w", err)
 	}
 
-	return false, nil
+	return sb.ClaimName(), sb.SandboxName(), sb.PodName(), nil
 }
 
 func (o *Orchestrator) updateTaskState(ctx context.Context, task *v1alpha1.AgentTask, state v1alpha1.AgentTaskState) error {
@@ -258,13 +440,19 @@ func (o *Orchestrator) updateTaskStatus(ctx context.Context, task *v1alpha1.Agen
 	return nil
 }
 
-// Start starts the orchestrator controller loop watching for AgentTasks
+// Start starts the orchestrator controller loop watching for AgentTasks and Pods
 func (o *Orchestrator) Start(ctx context.Context) error {
 	watcher, err := o.dynClient.Resource(agentTaskGVR).Namespace(o.namespace).Watch(ctx, metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
 	defer watcher.Stop()
+
+	podWatcher, err := o.k8sClient.CoreV1().Pods(o.namespace).Watch(ctx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	defer podWatcher.Stop()
 
 	for {
 		select {
@@ -282,6 +470,32 @@ func (o *Orchestrator) Start(ctx context.Context) error {
 				taskName := uObj.GetName()
 				if err := o.Reconcile(ctx, taskName); err != nil {
 					log.Printf("Reconcile error for %s: %v", taskName, err)
+				}
+			}
+		case event, ok := <-podWatcher.ResultChan():
+			if !ok {
+				return fmt.Errorf("pod watch channel closed")
+			}
+			if event.Type == watch.Added || event.Type == watch.Modified || event.Type == watch.Deleted {
+				pod, ok := event.Object.(*corev1.Pod)
+				if !ok {
+					continue
+				}
+				list, err := o.dynClient.Resource(agentTaskGVR).Namespace(o.namespace).List(ctx, metav1.ListOptions{})
+				if err != nil {
+					log.Printf("Failed to list AgentTasks for pod event: %v", err)
+					continue
+				}
+				for _, item := range list.Items {
+					task, err := v1alpha1.FromUnstructured(&item)
+					if err != nil {
+						continue
+					}
+					if task.Status.PodName == pod.Name && task.Status.State == v1alpha1.StateRunning {
+						if err := o.Reconcile(ctx, task.Name); err != nil {
+							log.Printf("Reconcile error for %s on pod event: %v", task.Name, err)
+						}
+					}
 				}
 			}
 		}

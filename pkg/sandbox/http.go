@@ -116,9 +116,16 @@ func TaskHandler(w http.ResponseWriter, r *http.Request) {
 	)
 
 	go func() {
-		if err := runner.Run(context.Background()); err != nil {
+		exitCode, err := runner.Run(context.Background())
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Task execution failed: %v\n", err)
-			os.Exit(1)
+			if os.Getenv("TEST_SANDBOX_API_URL") == "" {
+				os.Exit(exitCode)
+			}
+			return
+		}
+		if os.Getenv("TEST_SANDBOX_API_URL") == "" {
+			os.Exit(0)
 		}
 	}()
 

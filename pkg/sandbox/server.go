@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 type Runner struct {
@@ -85,13 +87,13 @@ func sanitizeError(err error, token string) error {
 	return fmt.Errorf("%s", msg)
 }
 
-func (r *Runner) Run(ctx context.Context) error {
+func (r *Runner) Run(ctx context.Context) (int, error) {
 	token := r.callbackToken
 	ghToken := r.githubToken
 
 	// 1. Prepare Workspace Directory
 	if err := os.MkdirAll(r.workspaceDir, 0755); err != nil {
-		return fmt.Errorf("failed to create workspace directory %s: %v", r.workspaceDir, err)
+		return 1, fmt.Errorf("failed to create workspace directory %s: %v", r.workspaceDir, err)
 	}
 
 	// 2. Clone Repository
@@ -106,7 +108,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	var cloneStderr bytes.Buffer
 	cloneCmd.Stderr = &cloneStderr
 	if err := cloneCmd.Run(); err != nil {
-		return sanitizeError(fmt.Errorf("failed to clone repository: %v (stderr: %s)", err, cloneStderr.String()), ghToken)
+		return 1, sanitizeError(fmt.Errorf("failed to clone repository: %v (stderr: %s)", err, cloneStderr.String()), ghToken)
 	}
 
 	// Helper to run git commands inside workspace
@@ -124,15 +126,15 @@ func (r *Runner) Run(ctx context.Context) error {
 	// 3. Configure Local Git Attribution and Branch (PR tasks only)
 	if r.taskType == "pr" {
 		if err := runGit("config", "user.name", r.taskOwner); err != nil {
-			return err
+			return 1, err
 		}
 		if err := runGit("config", "user.email", r.taskOwnerEmail); err != nil {
-			return err
+			return 1, err
 		}
 
 		branchName := fmt.Sprintf("attribution-test-%s", r.taskName)
 		if err := runGit("checkout", "-b", branchName); err != nil {
-			return err
+			return 1, err
 		}
 	}
 
@@ -152,7 +154,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	agentCmd.Stderr = &agentStderr
 
 	if err := agentCmd.Run(); err != nil {
-		return sanitizeError(fmt.Errorf("agent %s failed: %v (stderr: %s)", r.agentBinary, err, agentStderr.String()), ghToken)
+		exitCode := 1
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+		return exitCode, sanitizeError(fmt.Errorf("agent %s failed: %v (stderr: %s)", r.agentBinary, err, agentStderr.String()), ghToken)
 	}
 
 	responseStr := strings.TrimSpace(agentStdout.String())
@@ -165,29 +171,57 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("failed to marshal callback request: %v", err)
+		return 1, fmt.Errorf("failed to marshal callback request: %v", err)
 	}
 
-	// Post back to listener callback
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.callbackURL, bytes.NewBuffer(payloadBytes))
-	if err != nil {
-		return fmt.Errorf("failed to create callback request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	// Post back to listener callback with retries
+	var resp *http.Response
+	var lastErr error
+	backoff := 1 * time.Second
+	maxBackoff := 10 * time.Second
 
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("callback request failed: %v", err)
+	for attempt := 0; attempt <= 5; attempt++ {
+		if attempt > 0 {
+			jitter := time.Duration(rand.Int63n(int64(backoff)))
+			sleepTime := backoff + jitter
+			if sleepTime > maxBackoff {
+				sleepTime = maxBackoff
+			}
+			select {
+			case <-ctx.Done():
+				return 1, ctx.Err()
+			case <-time.After(sleepTime):
+			}
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.callbackURL, bytes.NewBuffer(payloadBytes))
+		if err != nil {
+			return 1, fmt.Errorf("failed to create callback request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, lastErr = r.httpClient.Do(req)
+		if lastErr == nil {
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("callback returned unexpected status %d: %s", resp.StatusCode, string(body))
+		}
 	}
-	defer func() {
+
+	if lastErr != nil {
+		return 1, lastErr
+	}
+	if resp != nil {
 		_ = resp.Body.Close()
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("callback returned unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 
-	return nil
+	return 0, nil
 }

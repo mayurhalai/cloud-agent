@@ -187,6 +187,17 @@ func (c *Client) CreateSandbox(ctx context.Context, template, namespace string) 
 	}, nil
 }
 
+// GetSandbox returns a handle to a Sandbox with pre-existing metadata.
+func (c *Client) GetSandbox(claimName, sandboxName, podName, namespace string) *Sandbox {
+	return &Sandbox{
+		client:      c,
+		claimName:   claimName,
+		sandboxName: sandboxName,
+		podName:     podName,
+		namespace:   namespace,
+	}
+}
+
 // Sandbox represents a managed sandbox instance.
 type Sandbox struct {
 	client      *Client
