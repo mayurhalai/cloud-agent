@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -138,17 +139,35 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 		log.Fatalf("AGENT_BIN is not set")
 	}
 
+	// 4. Resolve Model
+	var model string
+	modelsDir := os.Getenv("MODELS_DIR")
+	if modelsDir == "" {
+		modelsDir = "/etc/cloud-agent/models"
+	}
+	if r.taskType == "pr" {
+		model = readModelFromFile(filepath.Join(modelsDir, "model.pr"))
+	}
+	if model == "" {
+		model = readModelFromFile(filepath.Join(modelsDir, "model.general"))
+	}
+
 	// 5. Invoke CLI coding agent binary inside workspace
-	var agentCmd *exec.Cmd
+	var args []string
 	switch agentBin {
 	case "pi":
-		agentCmd = exec.CommandContext(ctx, agentBin, "-p", r.prompt)
+		args = []string{"-p", r.prompt}
 	case "opencode":
-		agentCmd = exec.CommandContext(ctx, agentBin, "run", r.prompt)
+		args = []string{"run", r.prompt}
 	default:
-		// Integration testing injects custom agent for testing
-		agentCmd = exec.CommandContext(ctx, agentBin)
+		args = []string{}
 	}
+
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+
+	agentCmd := exec.CommandContext(ctx, agentBin, args...)
 	agentCmd.Dir = r.workspaceDir
 	var agentStdout, agentStderr bytes.Buffer
 	agentCmd.Stdout = &agentStdout
@@ -225,4 +244,12 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 	}
 
 	return 0, nil
+}
+
+func readModelFromFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }

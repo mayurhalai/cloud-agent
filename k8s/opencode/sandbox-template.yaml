@@ -27,10 +27,18 @@ spec:
             requests:
               cpu: "250m"
               memory: "512Mi"
-          restartPolicy: "Never"
           env:
             - name: GEMINI_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: cloud-agent-secret
                   key: GEMINI_API_KEY
+          volumeMounts:
+            - name: models-config
+              mountPath: /etc/cloud-agent/models
+      restartPolicy: "Never"
+      volumes:
+        - name: models-config
+          configMap:
+            name: cloud-agent-models-config
+            optional: true

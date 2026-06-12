@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloud-agent-models-config
+data:
+  model.pr: "gemini-2.5-pro"
+  model.general: "gemini-2.5-flash"
