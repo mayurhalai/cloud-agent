@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.18.0
+	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-logr/logr v1.4.3
 	github.com/google/go-github/v60 v60.0.0

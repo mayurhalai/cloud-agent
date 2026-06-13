@@ -5,10 +5,28 @@ metadata:
 spec:
   podTemplate:
     spec:
+      # Run the pod as a non-root user
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: copy-config
+          image: busybox
+          command: ["/bin/sh", "-c"]
+          args:
+            - mkdir -p /home/node/.pi/agent && cp /etc/pi/agent/models.json /home/node/.pi/agent/models.json;
+          volumeMounts:
+            - name: provider-config
+              mountPath: /etc/pi/agent
+            - name: agent-home
+              mountPath: /home/node
       containers:
         - name: pi-agent
           image: agent-pi:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
           ports:
             - containerPort: 8888
           livenessProbe:
@@ -26,20 +44,22 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: GEMINI_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: cloud-agent-secret
-                  key: GEMINI_API_KEY
           volumeMounts:
             - name: models-config
               mountPath: /etc/cloud-agent/models
+            - name: agent-home
+              mountPath: /home/node
       restartPolicy: "Never"
       volumes:
         - name: models-config
           configMap:
             name: cloud-agent-models-config
             optional: true
+        - name: provider-config
+          configMap:
+            name: cloud-agent-provider-config
+        - name: agent-home
+          emptyDir: {}
   networkPolicy:
     egress:
       # Allow DNS lookups to kube-dns
@@ -48,6 +68,8 @@ spec:
             port: 53
           - protocol: TCP
             port: 53
+          - protocol: TCP
+            port: 12434
       - to:
           # Allow access to internet but block access to private networks
           - ipBlock:
@@ -70,3 +92,33 @@ spec:
           - podSelector:
               matchLabels:
                 app: sandbox-router
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloud-agent-provider-config
+data:
+  models.json: |
+    {
+      "providers": {
+        "ollama": {
+          "baseUrl": "http://docker-model-runner:12434/v1",
+          "api": "openai-completions",
+          "apiKey": "docker",
+          "models": [
+            { "id": "ai/gemma4:E2B" }
+          ]
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: docker-model-runner
+spec:
+  type: ExternalName
+  externalName: host.docker.internal
+  ports:
+  - port: 12434 # The TCP port you enabled in Docker Desktop
+    name: http

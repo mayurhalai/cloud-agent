@@ -87,7 +87,6 @@ func TestTaskHandler_MissingFields(t *testing.T) {
 		{
 			name: "missing taskName",
 			payload: TaskRequest{
-				CallbackURL:    "http://example.com/callback",
 				CallbackToken:  "cb-token",
 				GitHubToken:    "gh-token",
 				RepoOwner:      "owner",
@@ -100,25 +99,9 @@ func TestTaskHandler_MissingFields(t *testing.T) {
 			missingField: "taskName",
 		},
 		{
-			name: "missing callbackURL",
-			payload: TaskRequest{
-				TaskName:       "task-123",
-				CallbackToken:  "cb-token",
-				GitHubToken:    "gh-token",
-				RepoOwner:      "owner",
-				RepoName:       "repo",
-				TaskOwner:      "user",
-				TaskOwnerEmail: "user@example.com",
-				TaskType:       "issue",
-				Prompt:         "fix bug",
-			},
-			missingField: "callbackURL",
-		},
-		{
 			name: "missing callbackToken",
 			payload: TaskRequest{
 				TaskName:       "task-123",
-				CallbackURL:    "http://example.com/callback",
 				GitHubToken:    "gh-token",
 				RepoOwner:      "owner",
 				RepoName:       "repo",
@@ -133,7 +116,6 @@ func TestTaskHandler_MissingFields(t *testing.T) {
 			name: "missing githubToken",
 			payload: TaskRequest{
 				TaskName:       "task-123",
-				CallbackURL:    "http://example.com/callback",
 				CallbackToken:  "cb-token",
 				RepoOwner:      "owner",
 				RepoName:       "repo",
@@ -148,7 +130,6 @@ func TestTaskHandler_MissingFields(t *testing.T) {
 			name: "missing repoOwner",
 			payload: TaskRequest{
 				TaskName:       "task-123",
-				CallbackURL:    "http://example.com/callback",
 				CallbackToken:  "cb-token",
 				GitHubToken:    "gh-token",
 				RepoName:       "repo",
@@ -163,7 +144,6 @@ func TestTaskHandler_MissingFields(t *testing.T) {
 			name: "missing repoName",
 			payload: TaskRequest{
 				TaskName:       "task-123",
-				CallbackURL:    "http://example.com/callback",
 				CallbackToken:  "cb-token",
 				GitHubToken:    "gh-token",
 				RepoOwner:      "owner",
@@ -178,7 +158,6 @@ func TestTaskHandler_MissingFields(t *testing.T) {
 			name: "missing taskType",
 			payload: TaskRequest{
 				TaskName:       "task-123",
-				CallbackURL:    "http://example.com/callback",
 				CallbackToken:  "cb-token",
 				GitHubToken:    "gh-token",
 				RepoOwner:      "owner",
@@ -193,7 +172,6 @@ func TestTaskHandler_MissingFields(t *testing.T) {
 			name: "missing taskOwner",
 			payload: TaskRequest{
 				TaskName:       "task-123",
-				CallbackURL:    "http://example.com/callback",
 				CallbackToken:  "cb-token",
 				GitHubToken:    "gh-token",
 				RepoOwner:      "owner",
@@ -208,7 +186,6 @@ func TestTaskHandler_MissingFields(t *testing.T) {
 			name: "missing taskOwnerEmail",
 			payload: TaskRequest{
 				TaskName:      "task-123",
-				CallbackURL:   "http://example.com/callback",
 				CallbackToken: "cb-token",
 				GitHubToken:   "gh-token",
 				RepoOwner:     "owner",
@@ -223,7 +200,6 @@ func TestTaskHandler_MissingFields(t *testing.T) {
 			name: "missing prompt",
 			payload: TaskRequest{
 				TaskName:       "task-123",
-				CallbackURL:    "http://example.com/callback",
 				CallbackToken:  "cb-token",
 				GitHubToken:    "gh-token",
 				RepoOwner:      "owner",

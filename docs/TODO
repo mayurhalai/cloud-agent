@@ -1,3 +1,5 @@
-- We need a way to specify a model for various type of tasks. Either setup wide single model or model per task type. This should come from `cloud-agent-config` configmap. Model value (Or any value) update should be propageted to all components that uses this configmap.
 - Sandbox-server should not accept more than one task. Once it accepts the task, it should reject new task requests.
 - Sandbox server is not pushing code for PR tasks.
+- Label should be configurable via configmap
+- Add back integration tests
+- Copy pi configs to opencode (sandbox image and yamls)

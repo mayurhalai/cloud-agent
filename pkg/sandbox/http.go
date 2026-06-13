@@ -12,14 +12,12 @@ import (
 // TaskRequest defines the JSON payload accepted by the POST /task endpoint.
 type TaskRequest struct {
 	TaskName       string `json:"taskName"`
-	CallbackURL    string `json:"callbackURL"`
 	CallbackToken  string `json:"callbackToken,omitempty"`
 	GitHubToken    string `json:"githubToken,omitempty"`
 	RepoOwner      string `json:"repoOwner"`
 	RepoName       string `json:"repoName"`
 	TaskOwner      string `json:"taskOwner,omitempty"`
 	TaskOwnerEmail string `json:"taskOwnerEmail,omitempty"`
-	WorkspaceDir   string `json:"workspaceDir,omitempty"`
 	TaskType       string `json:"taskType,omitempty"`
 	Prompt         string `json:"prompt"`
 }
@@ -53,9 +51,6 @@ func TaskHandler(c *gin.Context) {
 	var missing []string
 	if req.TaskName == "" {
 		missing = append(missing, "taskName")
-	}
-	if req.CallbackURL == "" {
-		missing = append(missing, "callbackURL")
 	}
 	if req.CallbackToken == "" {
 		missing = append(missing, "callbackToken")
@@ -95,17 +90,14 @@ func TaskHandler(c *gin.Context) {
 	// Create and execute the runner
 	runner := NewRunner(
 		req.TaskName,
-		req.CallbackURL,
 		req.CallbackToken,
 		req.GitHubToken,
 		req.RepoOwner,
 		req.RepoName,
 		req.TaskOwner,
 		req.TaskOwnerEmail,
-		req.WorkspaceDir,
 		req.TaskType,
 		req.Prompt,
-		nil,
 	)
 
 	go func() {

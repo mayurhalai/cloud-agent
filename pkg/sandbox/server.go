@@ -3,70 +3,59 @@ package sandbox
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"math/rand"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
+
+	"github.com/cenkalti/backoff/v5"
+	"github.com/mayurhalai/cloud-agent/pkg/util"
+	"github.com/mayurhalai/cloud-agent/pkg/webhook"
 )
+
+const AGENT_HOME_DIR = "/home/node"
 
 type Runner struct {
 	taskName       string
-	callbackURL    string
 	callbackToken  string
 	githubToken    string
 	repoOwner      string
 	repoName       string
 	taskOwner      string
 	taskOwnerEmail string
-	workspaceDir   string
 	taskType       string
 	prompt         string
-	httpClient     *http.Client
+	webhooksClient *webhook.Client
 }
 
 func NewRunner(
 	taskName string,
-	callbackURL string,
 	callbackToken string,
 	githubToken string,
 	repoOwner string,
 	repoName string,
 	taskOwner string,
 	taskOwnerEmail string,
-	workspaceDir string,
 	taskType string,
 	prompt string,
-	httpClient *http.Client,
 ) *Runner {
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
-	if workspaceDir == "" {
-		workspaceDir = "/workspace"
-	}
+	client := webhook.NewClient(util.GetWebhookListenerURL(util.GetEnvWithDefault("KUBE_NAMESPACE", "cloud-agent")))
 	if taskType == "" {
 		taskType = "comment"
 	}
 	return &Runner{
 		taskName:       taskName,
-		callbackURL:    callbackURL,
 		callbackToken:  callbackToken,
 		githubToken:    githubToken,
 		repoOwner:      repoOwner,
 		repoName:       repoName,
 		taskOwner:      taskOwner,
 		taskOwnerEmail: taskOwnerEmail,
-		workspaceDir:   workspaceDir,
 		taskType:       taskType,
 		prompt:         prompt,
-		httpClient:     httpClient,
+		webhooksClient: client,
 	}
 }
 
@@ -84,12 +73,12 @@ func sanitizeError(err error, token string) error {
 }
 
 func (r *Runner) Run(ctx context.Context) (int, error) {
-	token := r.callbackToken
 	ghToken := r.githubToken
 
 	// 1. Prepare Workspace Directory
-	if err := os.MkdirAll(r.workspaceDir, 0755); err != nil {
-		return 1, fmt.Errorf("failed to create workspace directory %s: %v", r.workspaceDir, err)
+	workspaceDir := fmt.Sprintf("%s/%s", AGENT_HOME_DIR, r.repoName)
+	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
+		return 1, fmt.Errorf("failed to create workspace directory %s: %v", workspaceDir, err)
 	}
 
 	// 2. Clone Repository
@@ -100,7 +89,7 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 		cloneURL = fmt.Sprintf("https://x-access-token:%s@github.com/%s/%s.git", ghToken, r.repoOwner, r.repoName)
 	}
 
-	cloneCmd := exec.CommandContext(ctx, "git", "clone", cloneURL, r.workspaceDir)
+	cloneCmd := exec.CommandContext(ctx, "git", "clone", cloneURL, workspaceDir)
 	var cloneStderr bytes.Buffer
 	cloneCmd.Stderr = &cloneStderr
 	if err := cloneCmd.Run(); err != nil {
@@ -110,7 +99,7 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 	// Helper to run git commands inside workspace
 	runGit := func(args ...string) error {
 		cmd := exec.CommandContext(ctx, "git", args...)
-		cmd.Dir = r.workspaceDir
+		cmd.Dir = workspaceDir
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -168,7 +157,7 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 	}
 
 	agentCmd := exec.CommandContext(ctx, agentBin, args...)
-	agentCmd.Dir = r.workspaceDir
+	agentCmd.Dir = workspaceDir
 	var agentStdout, agentStderr bytes.Buffer
 	agentCmd.Stdout = &agentStdout
 	agentCmd.Stderr = &agentStderr
@@ -183,64 +172,12 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 
 	responseStr := strings.TrimSpace(agentStdout.String())
 
-	// Construct request body
-	payload := map[string]string{
-		"taskName": r.taskName,
-		"response": responseStr,
-	}
-
-	payloadBytes, err := json.Marshal(payload)
+	_, err := backoff.Retry(ctx, func() (interface{}, error) {
+		err := r.webhooksClient.Callback(ctx, r.callbackToken, r.taskName, responseStr)
+		return nil, err
+	}, backoff.WithMaxTries(5), backoff.WithBackOff(backoff.NewExponentialBackOff()))
 	if err != nil {
-		return 1, fmt.Errorf("failed to marshal callback request: %v", err)
-	}
-
-	// Post back to listener callback with retries
-	var resp *http.Response
-	var lastErr error
-	backoff := 1 * time.Second
-	maxBackoff := 10 * time.Second
-
-	for attempt := 0; attempt <= 5; attempt++ {
-		if attempt > 0 {
-			jitter := time.Duration(rand.Int63n(int64(backoff)))
-			sleepTime := backoff + jitter
-			if sleepTime > maxBackoff {
-				sleepTime = maxBackoff
-			}
-			select {
-			case <-ctx.Done():
-				return 1, ctx.Err()
-			case <-time.After(sleepTime):
-			}
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-		}
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.callbackURL, bytes.NewBuffer(payloadBytes))
-		if err != nil {
-			return 1, fmt.Errorf("failed to create callback request: %v", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+token)
-
-		resp, lastErr = r.httpClient.Do(req)
-		if lastErr == nil {
-			if resp.StatusCode == http.StatusOK {
-				break
-			}
-			body, _ := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			lastErr = fmt.Errorf("callback returned unexpected status %d: %s", resp.StatusCode, string(body))
-		}
-	}
-
-	if lastErr != nil {
-		return 1, lastErr
-	}
-	if resp != nil {
-		_ = resp.Body.Close()
+		return 1, fmt.Errorf("failed to callback: %v", err)
 	}
 
 	return 0, nil

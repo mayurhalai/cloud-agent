@@ -1,6 +1,7 @@
 resources:
   - ../base
-  - sandbox-template.yaml
+  # - sandbox-template.yaml
+  - local-model-sandbox.yaml
   - sandbox-warmpool.yaml
 
 namespace: cloud-agent

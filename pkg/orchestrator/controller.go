@@ -12,6 +12,7 @@ import (
 
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
 	"github.com/mayurhalai/cloud-agent/pkg/sandbox"
+	"github.com/mayurhalai/cloud-agent/pkg/util"
 	"github.com/mayurhalai/cloud-agent/pkg/webhook"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -51,7 +52,7 @@ func NewOrchestrator(k8sClient kubernetes.Interface, dynClient dynamic.Interface
 		}
 	}
 
-	webhookClient := webhook.NewClient(getWebhookListenerURL(namespace))
+	webhookClient := webhook.NewClient(util.GetWebhookListenerURL(namespace))
 
 	return &Orchestrator{
 		k8sClient:     k8sClient,
@@ -365,14 +366,12 @@ func (o *Orchestrator) trySubmitToSandbox(ctx context.Context, task *v1alpha1.Ag
 
 	taskReq := &sandbox.TaskRequest{
 		TaskName:       task.Name,
-		CallbackURL:    getWebhookListenerURL(o.namespace) + "/callback",
 		CallbackToken:  tokResp.CallbackToken,
 		GitHubToken:    tokResp.GitHubToken,
 		RepoOwner:      task.Spec.RepoOwner,
 		RepoName:       task.Spec.RepoName,
 		TaskOwner:      task.Spec.TaskOwner,
 		TaskOwnerEmail: task.Spec.TaskOwnerEmail,
-		WorkspaceDir:   getEnvWithDefault("WORKSPACE_DIR", "/workspace"),
 		TaskType:       task.Spec.TaskType,
 		Prompt:         task.Spec.Prompt,
 	}
@@ -472,15 +471,4 @@ func (o *Orchestrator) Start(ctx context.Context) error {
 			}
 		}
 	}
-}
-
-func getWebhookListenerURL(namespace string) string {
-	return getEnvWithDefault("WEBHOOK_LISTENER_URL", fmt.Sprintf("http://webhook-listener.%s.svc.cluster.local:8080", namespace))
-}
-
-func getEnvWithDefault(key, defaultVal string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
-	}
-	return defaultVal
 }
