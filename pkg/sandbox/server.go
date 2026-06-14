@@ -15,7 +15,14 @@ import (
 	"github.com/mayurhalai/cloud-agent/pkg/webhook"
 )
 
-const AGENT_HOME_DIR = "/home/node"
+var agentHomeDir = getAgentHomeDir()
+
+func getAgentHomeDir() string {
+	if val := os.Getenv("AGENT_HOME_DIR"); val != "" {
+		return val
+	}
+	return "/home/node"
+}
 
 type Runner struct {
 	taskName       string
@@ -76,7 +83,7 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 	ghToken := r.githubToken
 
 	// 1. Prepare Workspace Directory
-	workspaceDir := fmt.Sprintf("%s/%s", AGENT_HOME_DIR, r.repoName)
+	workspaceDir := fmt.Sprintf("%s/%s", agentHomeDir, r.repoName)
 	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
 		return 1, fmt.Errorf("failed to create workspace directory %s: %v", workspaceDir, err)
 	}
@@ -108,6 +115,19 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 		return nil
 	}
 
+	runGitOutput := func(args ...string) (string, error) {
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = workspaceDir
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return "", sanitizeError(fmt.Errorf("git %v failed: %v (stderr: %s)", args, err, stderr.String()), ghToken)
+		}
+		return stdout.String(), nil
+	}
+
+	var branchName string
 	// 3. Configure Local Git Attribution and Branch (PR tasks only)
 	if r.taskType == "pr" {
 		if err := runGit("config", "user.name", r.taskOwner); err != nil {
@@ -117,7 +137,7 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 			return 1, err
 		}
 
-		branchName := fmt.Sprintf("attribution-test-%s", r.taskName)
+		branchName = fmt.Sprintf("attribution-test-%s", r.taskName)
 		if err := runGit("checkout", "-b", branchName); err != nil {
 			return 1, err
 		}
@@ -171,6 +191,30 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 	}
 
 	responseStr := strings.TrimSpace(agentStdout.String())
+
+	// 6. Check, commit and push changes (PR tasks only)
+	if r.taskType == "pr" {
+		statusOut, err := runGitOutput("status", "--porcelain")
+		if err != nil {
+			return 1, err
+		}
+		if strings.TrimSpace(statusOut) != "" {
+			log.Printf("Runner: Changes detected in repository, staging and committing...")
+			if err := runGit("add", "-A"); err != nil {
+				return 1, err
+			}
+			commitMsg := fmt.Sprintf("cloud-agent: automated commit for task %s", r.taskName)
+			if err := runGit("commit", "-m", commitMsg); err != nil {
+				return 1, err
+			}
+			log.Printf("Runner: Pushing branch %s to remote...", branchName)
+			if err := runGit("push", "-f", "origin", branchName); err != nil {
+				return 1, err
+			}
+		} else {
+			log.Printf("Runner: No changes detected in repository, skipping commit and push.")
+		}
+	}
 
 	_, err := backoff.Retry(ctx, func() (interface{}, error) {
 		err := r.webhooksClient.Callback(ctx, r.callbackToken, r.taskName, responseStr)
