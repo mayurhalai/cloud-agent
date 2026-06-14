@@ -4,3 +4,4 @@ metadata:
   name: cloud-agent-config
 data:
   agent-retry-count: "0"
+  agent-label: "cloud-agent"

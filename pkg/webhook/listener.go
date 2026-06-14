@@ -138,7 +138,8 @@ func (s *ListenerServer) handleWebhook(c *gin.Context) {
 		taskOwner = event.Comment.User.Login
 		taskOwnerEmail = fmt.Sprintf("%d+%s@users.noreply.github.com", event.Comment.User.ID, event.Comment.User.Login)
 	case "labeled":
-		if event.Label == nil || event.Label.Name != "cloud-agent" {
+		agentLabel := getAgentLabel()
+		if event.Label == nil || event.Label.Name != agentLabel {
 			c.String(http.StatusOK, "Ignored non-cloud-agent label event")
 			return
 		}
@@ -228,6 +229,14 @@ func (s *ListenerServer) handleWebhook(c *gin.Context) {
 	}
 
 	c.String(http.StatusCreated, "Created task %s", taskID)
+}
+
+func getAgentLabel() string {
+	agentLabel := os.Getenv("AGENT_LABEL")
+	if agentLabel == "" {
+		agentLabel = "cloud-agent"
+	}
+	return agentLabel
 }
 
 func (s *ListenerServer) handleCallback(c *gin.Context) {

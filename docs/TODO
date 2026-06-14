@@ -1,3 +1,2 @@
-- Label should be configurable via configmap
 - Add back integration tests
 - Copy pi configs to opencode (sandbox image and yamls)

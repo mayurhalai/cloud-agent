@@ -47,6 +47,11 @@ spec:
                 configMapKeyRef:
                   name: cloud-agent-config
                   key: system-agent
+            - name: AGENT_LABEL
+              valueFrom:
+                configMapKeyRef:
+                  name: cloud-agent-config
+                  key: agent-label
           volumeMounts:
             - name: github-app-key
               mountPath: /etc/github
