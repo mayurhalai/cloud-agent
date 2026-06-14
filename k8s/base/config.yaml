@@ -4,4 +4,5 @@ metadata:
   name: cloud-agent-config
 data:
   agent-retry-count: "0"
-  agent-label: "cloud-agent"
+  agent-github-name: "site-worker" # Github bot name of the github app
+  agent-github-label: "cloud-agent" # Github label to listen for creating PRs

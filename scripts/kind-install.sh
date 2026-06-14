@@ -14,7 +14,7 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 kubectl create namespace cloud-agent
 
 # Install sandbox router
-AGENT_SANDBOX_REPO_LOCATION="../../kubernetes-sigs/agent-sandbox"
+AGENT_SANDBOX_REPO_LOCATION="../../kubernetes-sigs/agent-sandbox" # Location where https://github.com/kubernetes-sigs/agent-sandbox is cloned
 pushd "${AGENT_SANDBOX_REPO_LOCATION}/clients/python/agentic-sandbox-client/sandbox-router"
 SANDBOX_ROUTER_IMAGE="sandbox-router:latest"
 docker build -t $SANDBOX_ROUTER_IMAGE .

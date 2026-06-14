@@ -143,3 +143,37 @@ func (c *AppClient) MintInstallationToken(owner, repo string) (string, error) {
 
 	return token, nil
 }
+
+// GetIssueComments retrieves issue comments up to 30 and reports if there are more comments.
+func (c *AppClient) GetIssueComments(ctx context.Context, owner, repo string, issueNumber int) ([]*IssueComment, bool, error) {
+	client, err := c.getInstallationClient(owner, repo)
+	if err != nil {
+		return nil, false, err
+	}
+
+	opts := &github.IssueListCommentsOptions{
+		ListOptions: github.ListOptions{
+			PerPage: 30,
+		},
+	}
+
+	comments, resp, err := client.Issues.ListComments(ctx, owner, repo, issueNumber, opts)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to list comments: %w", err)
+	}
+
+	hasMore := resp.NextPage != 0
+	var result []*IssueComment
+	for _, comment := range comments {
+		author := ""
+		if comment.User != nil {
+			author = comment.User.GetLogin()
+		}
+		result = append(result, &IssueComment{
+			Author: author,
+			Body:   comment.GetBody(),
+		})
+	}
+
+	return result, hasMore, nil
+}

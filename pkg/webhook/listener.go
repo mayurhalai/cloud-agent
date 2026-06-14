@@ -133,14 +133,29 @@ func (s *ListenerServer) handleWebhook(c *gin.Context) {
 			c.String(http.StatusBadRequest, "Missing comment object for created action")
 			return
 		}
+		botName := getAgentName()
+		if !strings.Contains(strings.ToLower(event.Comment.Body), "@"+strings.ToLower(botName)) {
+			c.String(http.StatusOK, "Ignored comment without mention")
+			return
+		}
 		taskType = "comment"
-		prompt = event.Comment.Body
+		comments, hasMore, err := s.ghClient.GetIssueComments(c.Request.Context(), repoOwner, repoName, event.Issue.Number)
+		if err != nil {
+			c.String(http.StatusInternalServerError, "Failed to fetch issue comments: %v", err)
+			return
+		}
+		if hasMore {
+			_ = s.ghClient.PostComment(repoOwner, repoName, event.Issue.Number, "The agent does not support issues with more than 30 comments.")
+			c.String(http.StatusOK, "The agent does not support issues with more than 30 comments.")
+			return
+		}
+		prompt = formatPrompt(event.Issue.Title, event.Issue.Body, comments)
 		taskOwner = event.Comment.User.Login
 		taskOwnerEmail = fmt.Sprintf("%d+%s@users.noreply.github.com", event.Comment.User.ID, event.Comment.User.Login)
 	case "labeled":
 		agentLabel := getAgentLabel()
 		if event.Label == nil || event.Label.Name != agentLabel {
-			c.String(http.StatusOK, "Ignored non-cloud-agent label event")
+			c.String(http.StatusOK, fmt.Sprintf("Ignored non-%s label event", agentLabel))
 			return
 		}
 		// Check if it is a Pull Request
@@ -154,11 +169,17 @@ func (s *ListenerServer) handleWebhook(c *gin.Context) {
 			return
 		}
 		taskType = "pr"
-		if event.Issue.Body != "" {
-			prompt = event.Issue.Title + "\n\n" + event.Issue.Body
-		} else {
-			prompt = event.Issue.Title
+		comments, hasMore, err := s.ghClient.GetIssueComments(c.Request.Context(), repoOwner, repoName, event.Issue.Number)
+		if err != nil {
+			c.String(http.StatusInternalServerError, "Failed to fetch issue comments: %v", err)
+			return
 		}
+		if hasMore {
+			_ = s.ghClient.PostComment(repoOwner, repoName, event.Issue.Number, "The agent does not support issues with more than 30 comments.")
+			c.String(http.StatusOK, "The agent does not support issues with more than 30 comments.")
+			return
+		}
+		prompt = formatPrompt(event.Issue.Title, event.Issue.Body, comments)
 		taskOwner = event.Sender.Login
 		taskOwnerEmail = fmt.Sprintf("%d+%s@users.noreply.github.com", event.Sender.ID, event.Sender.Login)
 	default:
@@ -237,6 +258,27 @@ func getAgentLabel() string {
 		agentLabel = "cloud-agent"
 	}
 	return agentLabel
+}
+
+func getAgentName() string {
+	agentName := os.Getenv("AGENT_GITHUB_NAME")
+	if agentName == "" {
+		agentName = "cloud-agent"
+	}
+	return agentName
+}
+
+func formatPrompt(title, body string, comments []*github.IssueComment) string {
+	var sb strings.Builder
+	sb.WriteString("Issue Title: ")
+	sb.WriteString(title)
+	sb.WriteString("\n\nIssue Body:\n")
+	sb.WriteString(body)
+	sb.WriteString("\n\nComments:\n")
+	for _, c := range comments {
+		_, _ = fmt.Fprintf(&sb, "- [%s]: %s\n", c.Author, c.Body)
+	}
+	return sb.String()
 }
 
 func (s *ListenerServer) handleCallback(c *gin.Context) {
