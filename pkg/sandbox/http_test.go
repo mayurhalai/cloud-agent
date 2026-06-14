@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -12,6 +13,9 @@ import (
 )
 
 func setupTestRouter() *gin.Engine {
+	if err := os.Setenv("TEST_SANDBOX_API_URL", "http://localhost:8080"); err != nil {
+		panic(err)
+	}
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Any("/task", TaskHandler)
@@ -243,5 +247,91 @@ func TestTaskHandler_MissingFields(t *testing.T) {
 				t.Errorf("Expected message to contain %q, got %q", tt.missingField, resp.Message)
 			}
 		})
+	}
+}
+
+func TestTaskHandler_SingleTaskOnly(t *testing.T) {
+	router := setupTestRouter()
+
+	// Ensure we start with a clean state
+	ResetTaskAccepted()
+	defer ResetTaskAccepted()
+
+	validPayload := TaskRequest{
+		TaskName:       "task-1",
+		CallbackToken:  "cb-token-1",
+		GitHubToken:    "gh-token-1",
+		RepoOwner:      "owner-1",
+		RepoName:       "repo-1",
+		TaskOwner:      "user-1",
+		TaskOwnerEmail: "user1@example.com",
+		TaskType:       "pr",
+		Prompt:         "do something",
+	}
+
+	body1, err := json.Marshal(validPayload)
+	if err != nil {
+		t.Fatalf("Failed to marshal request payload: %v", err)
+	}
+
+	// 1. First valid request should succeed
+	req1, err := http.NewRequest(http.MethodPost, "/task", bytes.NewBuffer(body1))
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	rr1 := httptest.NewRecorder()
+	router.ServeHTTP(rr1, req1)
+
+	if rr1.Code != http.StatusOK {
+		t.Errorf("Expected first request status %d, got %d. Body: %s", http.StatusOK, rr1.Code, rr1.Body.String())
+	}
+
+	// 2. Subsequent valid request should be rejected with 405 Method Not Allowed and empty body
+	req2, err := http.NewRequest(http.MethodPost, "/task", bytes.NewBuffer(body1))
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	rr2 := httptest.NewRecorder()
+	router.ServeHTTP(rr2, req2)
+
+	if rr2.Code != http.StatusMethodNotAllowed {
+		t.Errorf("Expected second request status %d, got %d", http.StatusMethodNotAllowed, rr2.Code)
+	}
+	if rr2.Body.Len() != 0 {
+		t.Errorf("Expected second request body to be empty, got %q", rr2.Body.String())
+	}
+
+	// 3. Reset state and test that invalid request doesn't lock future valid requests
+	ResetTaskAccepted()
+
+	invalidPayload := TaskRequest{
+		TaskName: "", // missing required field
+	}
+	bodyInvalid, err := json.Marshal(invalidPayload)
+	if err != nil {
+		t.Fatalf("Failed to marshal request payload: %v", err)
+	}
+
+	reqInvalid, err := http.NewRequest(http.MethodPost, "/task", bytes.NewBuffer(bodyInvalid))
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	rrInvalid := httptest.NewRecorder()
+	router.ServeHTTP(rrInvalid, reqInvalid)
+
+	if rrInvalid.Code != http.StatusBadRequest {
+		t.Errorf("Expected invalid request status %d, got %d", http.StatusBadRequest, rrInvalid.Code)
+	}
+
+	// First valid request after a validation failure should still succeed
+	req3, err := http.NewRequest(http.MethodPost, "/task", bytes.NewBuffer(body1))
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	rr3 := httptest.NewRecorder()
+	router.ServeHTTP(rr3, req3)
+
+	if rr3.Code != http.StatusOK {
+		t.Errorf("Expected third request status %d, got %d. Body: %s", http.StatusOK, rr3.Code, rr3.Body.String())
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 )
@@ -28,8 +29,20 @@ type TaskResponse struct {
 	Message string `json:"message"`
 }
 
+var taskAccepted atomic.Bool
+
+// ResetTaskAccepted resets the accepted task state. Used primarily for testing.
+func ResetTaskAccepted() {
+	taskAccepted.Store(false)
+}
+
 // TaskHandler processes task configurations sent to the POST /task endpoint.
 func TaskHandler(c *gin.Context) {
+	if taskAccepted.Load() {
+		c.Status(http.StatusMethodNotAllowed)
+		return
+	}
+
 	if c.Request.Method != http.MethodPost {
 		c.JSON(http.StatusMethodNotAllowed, TaskResponse{
 			Status:  "error",
@@ -99,6 +112,8 @@ func TaskHandler(c *gin.Context) {
 		req.TaskType,
 		req.Prompt,
 	)
+
+	taskAccepted.Store(true)
 
 	go func() {
 		exitCode, err := runner.Run(context.Background())
