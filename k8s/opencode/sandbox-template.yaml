@@ -5,30 +5,33 @@ metadata:
 spec:
   podTemplate:
     spec:
+      # Run the pod as a non-root user
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
         - name: opencode-agent
           image: agent-opencode:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8888
-          readinessProbe:
-            httpGet:
-              path: "/"
-              port: 8888
-            initialDelaySeconds: 0
-            periodSeconds: 1
           livenessProbe:
             httpGet:
-              path: "/"
+              path: "/health"
               port: 8888
-            initialDelaySeconds: 2
-            periodSeconds: 10
+            initialDelaySeconds: 10
+            periodSeconds: 60
           resources:
             requests:
               cpu: "250m"
               memory: "512Mi"
           env:
-            - name: GEMINI_API_KEY
+            - name: KUBE_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: GOOGLE_GENERATIVE_AI_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: cloud-agent-secret
@@ -42,3 +45,33 @@ spec:
           configMap:
             name: cloud-agent-models-config
             optional: true
+  networkPolicy:
+    egress:
+      # Allow DNS lookups to kube-dns
+      - ports:
+          - protocol: UDP
+            port: 53
+          - protocol: TCP
+            port: 53
+      - to:
+          # Allow access to internet but block access to private networks
+          - ipBlock:
+              cidr: 0.0.0.0/0
+              except:
+                - 10.0.0.0/8
+                - 172.16.0.0/12
+                - 192.168.0.0/16
+                - 169.254.0.0/16
+          - ipBlock:
+              cidr: ::/0
+              except:
+                - fc00::/7
+          # Allow access to webhook-listener to send task results
+          - podSelector:
+              matchLabels:
+                app: webhook-listener
+    ingress:
+      - from:
+          - podSelector:
+              matchLabels:
+                app: sandbox-router

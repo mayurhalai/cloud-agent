@@ -5,6 +5,11 @@ metadata:
 spec:
   podTemplate:
     spec:
+      # Run the pod as a non-root user
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
         - name: pi-agent
           image: agent-pi:latest

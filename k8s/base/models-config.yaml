@@ -3,8 +3,5 @@ kind: ConfigMap
 metadata:
   name: cloud-agent-models-config
 data:
-  # model.pr: "gemini-flash-lite-latest"
-  # model.general: "gemma-4-26b-a4b-it"
-  # Local models for testing
-  model.pr: "ai/gemma4:E2B"
-  model.general: "ai/gemma4:E2B"
+  model.pr: "google/gemma-4-31b-it"
+  model.general: "google/gemma-4-26b-a4b-it"
