@@ -141,8 +141,6 @@ func TestRunner_Run_PR_WithChanges(t *testing.T) {
 	t.Setenv("WEBHOOK_LISTENER_URL", mockSrv.server.URL)
 	t.Setenv("GITHUB_API_URL", ghSrv.URL+"/")
 
-	agentHomeDir = getAgentHomeDir()
-
 	runner := NewRunner(
 		"task-123",
 		"cb-token-xyz",
@@ -217,8 +215,6 @@ func TestRunner_Run_PR_NoChanges(t *testing.T) {
 	t.Setenv("AGENT_BIN", agentPath)
 	t.Setenv("WEBHOOK_LISTENER_URL", mockSrv.server.URL)
 
-	agentHomeDir = getAgentHomeDir()
-
 	runner := NewRunner(
 		"task-456",
 		"cb-token-456",
@@ -275,8 +271,6 @@ func TestRunner_Run_CommentTask_NoCommitPush(t *testing.T) {
 	t.Setenv("GIT_REMOTE_URL", remoteDir)
 	t.Setenv("AGENT_BIN", agentPath)
 	t.Setenv("WEBHOOK_LISTENER_URL", mockSrv.server.URL)
-
-	agentHomeDir = getAgentHomeDir()
 
 	runner := NewRunner(
 		"task-789",

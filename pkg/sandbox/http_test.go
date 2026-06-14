@@ -20,7 +20,9 @@ func setupTestRouter() *gin.Engine {
 	if err != nil {
 		panic(err)
 	}
-	agentHomeDir = agentHome
+	if err := os.Setenv("AGENT_HOME_DIR", agentHome); err != nil {
+		panic(err)
+	}
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

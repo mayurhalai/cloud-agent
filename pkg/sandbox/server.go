@@ -18,8 +18,6 @@ import (
 	"golang.org/x/oauth2"
 )
 
-var agentHomeDir = getAgentHomeDir()
-
 func getAgentHomeDir() string {
 	if val := os.Getenv("AGENT_HOME_DIR"); val != "" {
 		return val
@@ -89,7 +87,7 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 	ghToken := r.githubToken
 
 	// 1. Prepare Workspace Directory
-	workspaceDir := fmt.Sprintf("%s/%s", agentHomeDir, r.repoName)
+	workspaceDir := fmt.Sprintf("%s/%s", getAgentHomeDir(), r.repoName)
 	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
 		return 1, fmt.Errorf("failed to create workspace directory %s: %v", workspaceDir, err)
 	}
