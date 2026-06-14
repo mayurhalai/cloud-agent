@@ -90,6 +90,11 @@ type CallbackRequest struct {
 	Response      string `json:"response"`
 }
 
+const (
+	enhancedCommentPrompt = "\n\nPlease **answer** based on the above issue and comments."
+	enhancedLabelPrompt   = "\n\nPlease **make changes** on the repository based on the above issue and comments."
+)
+
 func (s *ListenerServer) handleWebhook(c *gin.Context) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -150,6 +155,8 @@ func (s *ListenerServer) handleWebhook(c *gin.Context) {
 			return
 		}
 		prompt = formatPrompt(event.Issue.Title, event.Issue.Body, comments)
+		// Enhance prompt
+		prompt += enhancedCommentPrompt
 		taskOwner = event.Comment.User.Login
 		taskOwnerEmail = fmt.Sprintf("%d+%s@users.noreply.github.com", event.Comment.User.ID, event.Comment.User.Login)
 	case "labeled":
@@ -180,6 +187,8 @@ func (s *ListenerServer) handleWebhook(c *gin.Context) {
 			return
 		}
 		prompt = formatPrompt(event.Issue.Title, event.Issue.Body, comments)
+		// Enhance prompt
+		prompt += enhancedLabelPrompt
 		taskOwner = event.Sender.Login
 		taskOwnerEmail = fmt.Sprintf("%d+%s@users.noreply.github.com", event.Sender.ID, event.Sender.Login)
 	default:

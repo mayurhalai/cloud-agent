@@ -28,7 +28,7 @@ clean:
 	@echo "Cleaning up..."
 	rm -rf bin
 
-containers: container-sandbox-server container-webhook-listener container-orchestrator container-agent-pi
+containers: clean container-sandbox-server container-webhook-listener container-orchestrator container-agent-pi
 
 container-sandbox-server:
 	@docker build -t sandbox-server -f cmd/sandbox-server/Dockerfile .

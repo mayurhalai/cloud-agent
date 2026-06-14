@@ -21,6 +21,7 @@ type TaskRequest struct {
 	TaskOwnerEmail string `json:"taskOwnerEmail,omitempty"`
 	TaskType       string `json:"taskType,omitempty"`
 	Prompt         string `json:"prompt"`
+	IssueNumber    int    `json:"issueNumber,omitempty"`
 }
 
 // TaskResponse defines the JSON response returned by the POST /task endpoint.
@@ -111,6 +112,7 @@ func TaskHandler(c *gin.Context) {
 		req.TaskOwnerEmail,
 		req.TaskType,
 		req.Prompt,
+		req.IssueNumber,
 	)
 
 	taskAccepted.Store(true)

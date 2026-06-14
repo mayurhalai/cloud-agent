@@ -86,7 +86,7 @@ func TestHandleWebhook_Comment(t *testing.T) {
 			expectedStatus: http.StatusCreated,
 			expectedBody:   "Created task task-42-",
 			expectTask:     true,
-			expectedPrompt: "Issue Title: Test Title\n\nIssue Body:\nTest Body\n\nComments:\n- [user1]: Hello @my-test-bot, build this!\n",
+			expectedPrompt: "Issue Title: Test Title\n\nIssue Body:\nTest Body\n\nComments:\n- [user1]: Hello @my-test-bot, build this!\n" + enhancedCommentPrompt,
 		},
 		{
 			name: "Ignored comment when limit exceeded (>30 comments)",
@@ -229,7 +229,7 @@ func TestHandleWebhook_Labeled(t *testing.T) {
 			expectedStatus: http.StatusCreated,
 			expectedBody:   "Created task task-43-",
 			expectTask:     true,
-			expectedPrompt: "Issue Title: Test Labeled Title\n\nIssue Body:\nTest Labeled Body\n\nComments:\n- [user1]: Initial comment\n",
+			expectedPrompt: "Issue Title: Test Labeled Title\n\nIssue Body:\nTest Labeled Body\n\nComments:\n- [user1]: Initial comment\n" + enhancedLabelPrompt,
 		},
 		{
 			name: "PR labeled not supported",

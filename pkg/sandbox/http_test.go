@@ -16,6 +16,12 @@ func setupTestRouter() *gin.Engine {
 	if err := os.Setenv("TEST_SANDBOX_API_URL", "http://localhost:8080"); err != nil {
 		panic(err)
 	}
+	agentHome, err := os.MkdirTemp("", "agent-home-*")
+	if err != nil {
+		panic(err)
+	}
+	agentHomeDir = agentHome
+
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Any("/task", TaskHandler)

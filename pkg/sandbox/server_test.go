@@ -99,6 +99,23 @@ echo "Agent output message"
 	return agentPath
 }
 
+func mockGitHubServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repos/testowner/testrepo/pulls") && r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"number": 42}`))
+			return
+		}
+		if r.URL.Path == "/repos/testowner/testrepo" && r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"default_branch": "main"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+}
+
 func TestRunner_Run_PR_WithChanges(t *testing.T) {
 	remoteDir := setupRemoteRepo(t)
 	defer func() { _ = os.RemoveAll(remoteDir) }()
@@ -108,6 +125,9 @@ func TestRunner_Run_PR_WithChanges(t *testing.T) {
 
 	mockSrv := startMockWebhookServer(t)
 	defer mockSrv.server.Close()
+
+	ghSrv := mockGitHubServer(t)
+	defer ghSrv.Close()
 
 	agentHome, err := os.MkdirTemp("", "agent-home-*")
 	if err != nil {
@@ -119,6 +139,7 @@ func TestRunner_Run_PR_WithChanges(t *testing.T) {
 	t.Setenv("GIT_REMOTE_URL", remoteDir)
 	t.Setenv("AGENT_BIN", agentPath)
 	t.Setenv("WEBHOOK_LISTENER_URL", mockSrv.server.URL)
+	t.Setenv("GITHUB_API_URL", ghSrv.URL+"/")
 
 	agentHomeDir = getAgentHomeDir()
 
@@ -132,6 +153,7 @@ func TestRunner_Run_PR_WithChanges(t *testing.T) {
 		"agent@example.com",
 		"pr",
 		"please create changes",
+		123,
 	)
 
 	exitCode, err := runner.Run(context.Background())
@@ -145,8 +167,8 @@ func TestRunner_Run_PR_WithChanges(t *testing.T) {
 	if mockSrv.lastCallback == nil {
 		t.Fatalf("Webhook callback was not received")
 	}
-	if mockSrv.lastCallback.Response != "Agent output message" {
-		t.Errorf("Expected callback response 'Agent output message', got %q", mockSrv.lastCallback.Response)
+	if mockSrv.lastCallback.Response != "I have created a PR #42" {
+		t.Errorf("Expected callback response 'I have created a PR #42', got %q", mockSrv.lastCallback.Response)
 	}
 	if mockSrv.lastCallback.TaskName != "task-123" {
 		t.Errorf("Expected taskName 'task-123', got %q", mockSrv.lastCallback.TaskName)
@@ -207,18 +229,19 @@ func TestRunner_Run_PR_NoChanges(t *testing.T) {
 		"agent@example.com",
 		"pr",
 		"please create changes",
+		456,
 	)
 
 	exitCode, err := runner.Run(context.Background())
-	if err != nil {
-		t.Fatalf("Runner.Run failed: %v", err)
+	if err == nil {
+		t.Fatalf("Runner.Run failed: Expected error but did not get one")
 	}
-	if exitCode != 0 {
-		t.Errorf("Expected exit code 0, got %d", exitCode)
+	if exitCode != 1 {
+		t.Errorf("Expected exit code 1, got %d", exitCode)
 	}
 
-	if mockSrv.lastCallback == nil {
-		t.Fatalf("Webhook callback was not received")
+	if mockSrv.lastCallback != nil {
+		t.Fatalf("Webhook callback was not expected but received: %+v", mockSrv.lastCallback)
 	}
 
 	cmd := exec.Command("git", "branch", "--list", "attribution-test-task-456")
@@ -265,6 +288,7 @@ func TestRunner_Run_CommentTask_NoCommitPush(t *testing.T) {
 		"agent@example.com",
 		"comment",
 		"please answer",
+		789,
 	)
 
 	exitCode, err := runner.Run(context.Background())

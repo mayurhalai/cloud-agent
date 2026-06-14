@@ -374,6 +374,7 @@ func (o *Orchestrator) trySubmitToSandbox(ctx context.Context, task *v1alpha1.Ag
 		TaskOwnerEmail: task.Spec.TaskOwnerEmail,
 		TaskType:       task.Spec.TaskType,
 		Prompt:         task.Spec.Prompt,
+		IssueNumber:    task.Spec.IssueNumber,
 	}
 
 	if err := sb.SubmitTask(ctx, taskReq); err != nil {

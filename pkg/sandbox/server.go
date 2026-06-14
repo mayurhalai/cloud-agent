@@ -5,14 +5,17 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/cenkalti/backoff/v5"
+	"github.com/google/go-github/v60/github"
 	"github.com/mayurhalai/cloud-agent/pkg/util"
 	"github.com/mayurhalai/cloud-agent/pkg/webhook"
+	"golang.org/x/oauth2"
 )
 
 var agentHomeDir = getAgentHomeDir()
@@ -34,6 +37,7 @@ type Runner struct {
 	taskOwnerEmail string
 	taskType       string
 	prompt         string
+	issueNumber    int
 	webhooksClient *webhook.Client
 }
 
@@ -47,6 +51,7 @@ func NewRunner(
 	taskOwnerEmail string,
 	taskType string,
 	prompt string,
+	issueNumber int,
 ) *Runner {
 	client := webhook.NewClient(util.GetWebhookListenerURL(util.GetEnvWithDefault("KUBE_NAMESPACE", "cloud-agent")))
 	if taskType == "" {
@@ -62,6 +67,7 @@ func NewRunner(
 		taskOwnerEmail: taskOwnerEmail,
 		taskType:       taskType,
 		prompt:         prompt,
+		issueNumber:    issueNumber,
 		webhooksClient: client,
 	}
 }
@@ -211,8 +217,44 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 			if err := runGit("push", "-f", "origin", branchName); err != nil {
 				return 1, err
 			}
+
+			log.Printf("Runner: Creating Pull Request for branch %s...", branchName)
+			ts := oauth2.StaticTokenSource(
+				&oauth2.Token{AccessToken: ghToken},
+			)
+			tc := oauth2.NewClient(ctx, ts)
+			client := github.NewClient(tc)
+
+			if ghAPI := os.Getenv("GITHUB_API_URL"); ghAPI != "" {
+				if parsedURL, err := url.Parse(ghAPI); err == nil {
+					client.BaseURL = parsedURL
+					client.UploadURL = parsedURL
+				}
+			}
+
+			repo, _, err := client.Repositories.Get(ctx, r.repoOwner, r.repoName)
+			if err != nil {
+				return 1, fmt.Errorf("failed to get repository: %v", err)
+			}
+
+			newPR := &github.NewPullRequest{
+				Title:               new(fmt.Sprintf("Automated PR: %s", r.taskName)),
+				Head:                new(branchName),
+				Base:                new(repo.GetDefaultBranch()),
+				Body:                new(fmt.Sprintf("Resolves #%d", r.issueNumber)),
+				MaintainerCanModify: new(true),
+			}
+
+			pr, _, err := client.PullRequests.Create(ctx, r.repoOwner, r.repoName, newPR)
+			if err != nil {
+				return 1, fmt.Errorf("failed to create PR: %v", err)
+			}
+
+			log.Printf("Runner: Successfully created PR #%d", pr.GetNumber())
+			responseStr = fmt.Sprintf("I have created a PR #%d", pr.GetNumber())
 		} else {
 			log.Printf("Runner: No changes detected in repository, skipping commit and push.")
+			return 1, fmt.Errorf("failed to make any changes to the repository") // Changes was expected but none were made, so we return an error to indicate failure.
 		}
 	}
 
