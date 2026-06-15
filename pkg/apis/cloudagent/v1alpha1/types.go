@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -10,6 +11,7 @@ type AgentTaskState string
 
 const (
 	StatePending   AgentTaskState = "Pending"
+	StateStarted   AgentTaskState = "Started"
 	StateRunning   AgentTaskState = "Running"
 	StateCompleted AgentTaskState = "Completed"
 	StateFailed    AgentTaskState = "Failed"
@@ -17,16 +19,22 @@ const (
 )
 
 type AgentTaskSpec struct {
-	Prompt                 string `json:"prompt,omitempty"`
-	SandboxTemplate        string `json:"sandboxTemplate,omitempty"`
-	TaskOwner              string `json:"taskOwner,omitempty"`
-	TaskOwnerEmail         string `json:"taskOwnerEmail,omitempty"`
-	GitHubTokenSecretRef   string `json:"githubTokenSecretRef,omitempty"`
-	CallbackTokenSecretRef string `json:"callbackTokenSecretRef,omitempty"`
+	Prompt          string `json:"prompt,omitempty"`
+	SandboxTemplate string `json:"sandboxTemplate,omitempty"`
+	TaskOwner       string `json:"taskOwner,omitempty"`
+	TaskOwnerEmail  string `json:"taskOwnerEmail,omitempty"`
+	RepoOwner       string `json:"repoOwner,omitempty"`
+	RepoName        string `json:"repoName,omitempty"`
+	IssueNumber     int    `json:"issueNumber,omitempty"`
+	TaskType        string `json:"taskType,omitempty"`
 }
 
 type AgentTaskStatus struct {
-	State AgentTaskState `json:"state,omitempty"`
+	State            AgentTaskState `json:"state,omitempty"`
+	Retries          int            `json:"retries,omitempty"`
+	SandboxClaimName string         `json:"sandboxClaimName,omitempty"`
+	SandboxName      string         `json:"sandboxName,omitempty"`
+	PodName          string         `json:"podName,omitempty"`
 }
 
 type AgentTask struct {

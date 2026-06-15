@@ -50,7 +50,7 @@ Responsibilities:
 
 ### Agent sandbox orchestration controller (or agent-sandbox client)
 
-The Agent sandbox orchestration controller is responsible for managing the lifecycle of agent sandboxes. It will create and destroy agent sandboxes based on request from GitHub App. The controller will use sigs.k8s.io/agent-sandbox/clients/go/sandbox to create and manage sandboxes.
+The Agent sandbox orchestration controller is responsible for managing the lifecycle of agent sandboxes. It will create and destroy agent sandboxes based on request from GitHub App. The controller will use SandboxClaims to create and manage sandboxes.
 
 To speed up execution, we should keep SandboxWarmPool for all kind of required languages.
 

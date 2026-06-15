@@ -9,13 +9,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
+	"os"
 	"strings"
 
+	"github.com/gin-gonic/gin"
 	"github.com/mayurhalai/cloud-agent/pkg/apis/cloudagent/v1alpha1"
 	"github.com/mayurhalai/cloud-agent/pkg/github"
 	yaml "gopkg.in/yaml.v3"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -34,16 +34,24 @@ type ListenerServer struct {
 	ghClient      github.Client
 	namespace     string
 	webhookSecret []byte
+	tokenStore    TokenStore
 }
 
-func NewListenerServer(k8sClient kubernetes.Interface, dynClient dynamic.Interface, ghClient github.Client, namespace string, webhookSecret []byte) *ListenerServer {
-	return &ListenerServer{
+func NewListenerServer(k8sClient kubernetes.Interface, dynClient dynamic.Interface, ghClient github.Client, namespace string, webhookSecret []byte, tokenStore TokenStore) *gin.Engine {
+	s := &ListenerServer{
 		k8sClient:     k8sClient,
 		dynClient:     dynClient,
 		ghClient:      ghClient,
 		namespace:     namespace,
 		webhookSecret: webhookSecret,
+		tokenStore:    tokenStore,
 	}
+
+	r := gin.Default()
+	r.POST("/webhook", s.handleWebhook)
+	r.POST("/callback", s.handleCallback)
+	r.POST("/task/:taskID/tokens", s.handleGenerateTokens)
+	return r
 }
 
 type GitHubWebhookEvent struct {
@@ -82,56 +90,37 @@ type CallbackRequest struct {
 	Response      string `json:"response"`
 }
 
-func (s *ListenerServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+const (
+	enhancedCommentPrompt = "\n\nPlease **answer** based on the above issue and comments."
+	enhancedLabelPrompt   = "\n\nPlease **make changes** on the repository based on the above issue and comments."
+)
 
-	u, err := url.Parse(r.URL.Path)
+func (s *ListenerServer) handleWebhook(c *gin.Context) {
+	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		http.Error(w, "Invalid path", http.StatusBadRequest)
-		return
-	}
-
-	switch u.Path {
-	case "/webhook":
-		s.handleWebhook(w, r)
-		return
-	case "/callback":
-		s.handleCallback(w, r)
-		return
-	}
-
-	http.Error(w, "Not found", http.StatusNotFound)
-}
-
-func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		c.String(http.StatusBadRequest, "Failed to read body")
 		return
 	}
 	defer func() {
-		_ = r.Body.Close()
+		_ = c.Request.Body.Close()
 	}()
 
 	if len(s.webhookSecret) > 0 {
-		signature := r.Header.Get("X-Hub-Signature-256")
+		signature := c.GetHeader("X-Hub-Signature-256")
 		if signature == "" {
-			http.Error(w, "Missing X-Hub-Signature-256 header", http.StatusUnauthorized)
+			c.String(http.StatusUnauthorized, "Missing X-Hub-Signature-256 header")
 			return
 		}
 
 		if !validateSignature(s.webhookSecret, body, signature) {
-			http.Error(w, "Invalid webhook signature", http.StatusUnauthorized)
+			c.String(http.StatusUnauthorized, "Invalid webhook signature")
 			return
 		}
 	}
 
 	var event GitHubWebhookEvent
 	if err := json.Unmarshal(body, &event); err != nil {
-		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		c.String(http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
 
@@ -146,46 +135,80 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	switch event.Action {
 	case "created":
 		if event.Comment == nil {
-			http.Error(w, "Missing comment object for created action", http.StatusBadRequest)
+			c.String(http.StatusBadRequest, "Missing comment object for created action")
+			return
+		}
+		botName := getAgentName()
+		if !strings.Contains(strings.ToLower(event.Comment.Body), "@"+strings.ToLower(botName)) {
+			c.String(http.StatusOK, "Ignored comment without mention")
 			return
 		}
 		taskType = "comment"
-		prompt = event.Comment.Body
+		comments, hasMore, err := s.ghClient.GetIssueComments(c.Request.Context(), repoOwner, repoName, event.Issue.Number)
+		if err != nil {
+			c.String(http.StatusInternalServerError, "Failed to fetch issue comments: %v", err)
+			return
+		}
+		if hasMore {
+			_ = s.ghClient.PostComment(repoOwner, repoName, event.Issue.Number, "The agent does not support issues with more than 30 comments.")
+			c.String(http.StatusOK, "The agent does not support issues with more than 30 comments.")
+			return
+		}
+		prompt = formatPrompt(event.Issue.Title, event.Issue.Body, comments)
+		// Enhance prompt
+		prompt += enhancedCommentPrompt
 		taskOwner = event.Comment.User.Login
 		taskOwnerEmail = fmt.Sprintf("%d+%s@users.noreply.github.com", event.Comment.User.ID, event.Comment.User.Login)
 	case "labeled":
-		if event.Label == nil || event.Label.Name != "cloud-agent" {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("Ignored non-cloud-agent label event"))
+		agentLabel := getAgentLabel()
+		if event.Label == nil || event.Label.Name != agentLabel {
+			c.String(http.StatusOK, fmt.Sprintf("Ignored non-%s label event", agentLabel))
 			return
 		}
 		// Check if it is a Pull Request
 		if event.Issue.PullRequest != nil {
 			err = s.ghClient.PostComment(repoOwner, repoName, event.Issue.Number, "Adding label on a PR is not supported.")
 			if err != nil {
-				http.Error(w, fmt.Sprintf("Failed to post comment to GitHub: %v", err), http.StatusInternalServerError)
+				c.String(http.StatusInternalServerError, "Failed to post comment to GitHub: %v", err)
 				return
 			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("Adding label on a PR is not supported."))
+			c.String(http.StatusOK, "Adding label on a PR is not supported.")
 			return
 		}
 		taskType = "pr"
-		if event.Issue.Body != "" {
-			prompt = event.Issue.Title + "\n\n" + event.Issue.Body
-		} else {
-			prompt = event.Issue.Title
+		comments, hasMore, err := s.ghClient.GetIssueComments(c.Request.Context(), repoOwner, repoName, event.Issue.Number)
+		if err != nil {
+			c.String(http.StatusInternalServerError, "Failed to fetch issue comments: %v", err)
+			return
 		}
+		if hasMore {
+			_ = s.ghClient.PostComment(repoOwner, repoName, event.Issue.Number, "The agent does not support issues with more than 30 comments.")
+			c.String(http.StatusOK, "The agent does not support issues with more than 30 comments.")
+			return
+		}
+		prompt = formatPrompt(event.Issue.Title, event.Issue.Body, comments)
+		// Enhance prompt
+		prompt += enhancedLabelPrompt
 		taskOwner = event.Sender.Login
 		taskOwnerEmail = fmt.Sprintf("%d+%s@users.noreply.github.com", event.Sender.ID, event.Sender.Login)
 	default:
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("Ignored unsupported action"))
+		c.String(http.StatusOK, "Ignored unsupported action")
 		return
 	}
 
 	// Webhook Listener fetches `.cloud-agent.yaml` from the repository to read the `SandboxTemplate`
-	sandboxTemplate := "default"
+	var sandboxTemplate string
+
+	systemAgent := os.Getenv("SYSTEM_AGENT")
+	switch systemAgent {
+	case "pi":
+		sandboxTemplate = "pi-sandbox-template"
+	case "opencode":
+		sandboxTemplate = "opencode-sandbox-template"
+	default:
+		sandboxTemplate = "pi-sandbox-template"
+	}
+
 	configBytes, err := s.ghClient.GetFile(repoOwner, repoName, ".cloud-agent.yaml")
 	if err == nil {
 		var config struct {
@@ -196,56 +219,7 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Listener mints a GitHub installation token using its App private key
-	githubToken, err := s.ghClient.MintInstallationToken(repoOwner, repoName)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to mint github token: %v", err), http.StatusInternalServerError)
-		return
-	}
-
 	taskID := fmt.Sprintf("task-%d-%s", event.Issue.Number, generateRandomHex(4))
-
-	callbackToken := generateRandomHex(16)
-
-	// Create Callback Token Secret
-	cbSecretName := fmt.Sprintf("%s-callback-token", taskID)
-	cbSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cbSecretName,
-			Namespace: s.namespace,
-			Labels: map[string]string{
-				"cloudagent.mayurhalai.github.com/task-id": taskID,
-			},
-		},
-		StringData: map[string]string{
-			"token": callbackToken,
-		},
-	}
-	_, err = s.k8sClient.CoreV1().Secrets(s.namespace).Create(r.Context(), cbSecret, metav1.CreateOptions{})
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to create callback secret: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Create GitHub Token Secret
-	ghSecretName := fmt.Sprintf("%s-github-token", taskID)
-	ghSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ghSecretName,
-			Namespace: s.namespace,
-			Labels: map[string]string{
-				"cloudagent.mayurhalai.github.com/task-id": taskID,
-			},
-		},
-		StringData: map[string]string{
-			"token": githubToken,
-		},
-	}
-	_, err = s.k8sClient.CoreV1().Secrets(s.namespace).Create(r.Context(), ghSecret, metav1.CreateOptions{})
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to create github token secret: %v", err), http.StatusInternalServerError)
-		return
-	}
 
 	// Parse issue comment/label event information to populate the AgentTask CRD
 	agentTask := &v1alpha1.AgentTask{
@@ -256,20 +230,16 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskID,
 			Namespace: s.namespace,
-			Annotations: map[string]string{
-				"cloudagent.mayurhalai.github.com/issue-number": fmt.Sprintf("%d", event.Issue.Number),
-				"cloudagent.mayurhalai.github.com/repo-owner":   repoOwner,
-				"cloudagent.mayurhalai.github.com/repo-name":    repoName,
-				"cloudagent.mayurhalai.github.com/task-type":    taskType,
-			},
 		},
 		Spec: v1alpha1.AgentTaskSpec{
-			Prompt:                 prompt,
-			SandboxTemplate:        sandboxTemplate,
-			TaskOwner:              taskOwner,
-			TaskOwnerEmail:         taskOwnerEmail,
-			GitHubTokenSecretRef:   ghSecretName,
-			CallbackTokenSecretRef: cbSecretName,
+			Prompt:          prompt,
+			SandboxTemplate: sandboxTemplate,
+			TaskOwner:       taskOwner,
+			TaskOwnerEmail:  taskOwnerEmail,
+			RepoOwner:       repoOwner,
+			RepoName:        repoName,
+			IssueNumber:     event.Issue.Number,
+			TaskType:        taskType,
 		},
 		Status: v1alpha1.AgentTaskStatus{
 			State: v1alpha1.StatePending,
@@ -278,60 +248,72 @@ func (s *ListenerServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	uTask, err := v1alpha1.ToUnstructured(agentTask)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to serialize AgentTask: %v", err), http.StatusInternalServerError)
+		c.String(http.StatusInternalServerError, "Failed to serialize AgentTask: %v", err)
 		return
 	}
 
-	_, err = s.dynClient.Resource(agentTaskGVR).Namespace(s.namespace).Create(r.Context(), uTask, metav1.CreateOptions{})
+	_, err = s.dynClient.Resource(agentTaskGVR).Namespace(s.namespace).Create(c.Request.Context(), uTask, metav1.CreateOptions{})
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to create AgentTask CRD: %v", err), http.StatusInternalServerError)
+		c.String(http.StatusInternalServerError, "Failed to create AgentTask CRD: %v", err)
 		return
 	}
 
-	w.WriteHeader(http.StatusCreated)
-	_, _ = fmt.Fprintf(w, "Created task %s", taskID)
+	c.String(http.StatusCreated, "Created task %s", taskID)
 }
 
-func (s *ListenerServer) handleCallback(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Failed to read body", http.StatusBadRequest)
-		return
+func getAgentLabel() string {
+	agentLabel := os.Getenv("AGENT_LABEL")
+	if agentLabel == "" {
+		agentLabel = "cloud-agent"
 	}
-	defer func() {
-		_ = r.Body.Close()
-	}()
+	return agentLabel
+}
 
+func getAgentName() string {
+	agentName := os.Getenv("AGENT_GITHUB_NAME")
+	if agentName == "" {
+		agentName = "cloud-agent"
+	}
+	return agentName
+}
+
+func formatPrompt(title, body string, comments []*github.IssueComment) string {
+	var sb strings.Builder
+	sb.WriteString("Issue Title: ")
+	sb.WriteString(title)
+	sb.WriteString("\n\nIssue Body:\n")
+	sb.WriteString(body)
+	sb.WriteString("\n\nComments:\n")
+	for _, c := range comments {
+		_, _ = fmt.Fprintf(&sb, "- [%s]: %s\n", c.Author, c.Body)
+	}
+	return sb.String()
+}
+
+func (s *ListenerServer) handleCallback(c *gin.Context) {
 	var req CallbackRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.String(http.StatusBadRequest, "Invalid JSON payload: %v", err)
 		return
 	}
 
 	// Fetch AgentTask
-	uTask, err := s.dynClient.Resource(agentTaskGVR).Namespace(s.namespace).Get(r.Context(), req.TaskName, metav1.GetOptions{})
+	uTask, err := s.dynClient.Resource(agentTaskGVR).Namespace(s.namespace).Get(c.Request.Context(), req.TaskName, metav1.GetOptions{})
 	if err != nil {
-		http.Error(w, fmt.Sprintf("AgentTask %s not found", req.TaskName), http.StatusNotFound)
+		c.String(http.StatusNotFound, "AgentTask %s not found", req.TaskName)
 		return
 	}
 
 	task, err := v1alpha1.FromUnstructured(uTask)
 	if err != nil {
-		http.Error(w, "Failed to parse AgentTask", http.StatusInternalServerError)
+		c.String(http.StatusInternalServerError, "Failed to parse AgentTask")
 		return
 	}
 
-	// Fetch Callback Token Secret to verify
-	cbSecret, err := s.k8sClient.CoreV1().Secrets(s.namespace).Get(r.Context(), task.Spec.CallbackTokenSecretRef, metav1.GetOptions{})
-	if err != nil {
-		http.Error(w, "Callback token secret not found or already verified", http.StatusUnauthorized)
-		return
-	}
-
-	authHeader := r.Header.Get("Authorization")
+	authHeader := c.GetHeader("Authorization")
 	var callbackToken string
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		callbackToken = strings.TrimPrefix(authHeader, "Bearer ")
+	if after, ok := strings.CutPrefix(authHeader, "Bearer "); ok {
+		callbackToken = after
 	} else if authHeader != "" {
 		callbackToken = authHeader
 	} else {
@@ -339,43 +321,37 @@ func (s *ListenerServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if callbackToken == "" {
-		http.Error(w, "Missing callback token", http.StatusUnauthorized)
+		c.String(http.StatusUnauthorized, "Missing callback token")
 		return
 	}
 
-	var storedToken string
-	if len(cbSecret.Data["token"]) > 0 {
-		storedToken = string(cbSecret.Data["token"])
-	} else {
-		storedToken = cbSecret.StringData["token"]
-	}
-
-	if storedToken != callbackToken {
-		http.Error(w, "Invalid callback token", http.StatusUnauthorized)
-		return
-	}
-
-	// Invalidate/delete callback token Secret per ADR 0008
-	err = s.k8sClient.CoreV1().Secrets(s.namespace).Delete(r.Context(), task.Spec.CallbackTokenSecretRef, metav1.DeleteOptions{})
+	// Verify token against TokenStore
+	valid, err := s.tokenStore.VerifyToken(c.Request.Context(), req.TaskName, callbackToken)
 	if err != nil {
-		http.Error(w, "Failed to invalidate callback token secret", http.StatusInternalServerError)
+		c.String(http.StatusInternalServerError, "Failed to verify callback token: %v", err)
+		return
+	}
+	if !valid {
+		c.String(http.StatusUnauthorized, "Invalid callback token")
 		return
 	}
 
-	// Retrieve repository details from annotations
-	repoOwner := task.Annotations["cloudagent.mayurhalai.github.com/repo-owner"]
-	repoName := task.Annotations["cloudagent.mayurhalai.github.com/repo-name"]
-	var issueNumber int
-	_, err = fmt.Sscanf(task.Annotations["cloudagent.mayurhalai.github.com/issue-number"], "%d", &issueNumber)
+	// Invalidate/delete callback token from TokenStore
+	err = s.tokenStore.DeleteToken(c.Request.Context(), req.TaskName)
 	if err != nil {
-		http.Error(w, "Invalid issue number annotation", http.StatusInternalServerError)
+		c.String(http.StatusInternalServerError, "Failed to invalidate callback token")
 		return
 	}
+
+	// Retrieve repository details from spec
+	repoOwner := task.Spec.RepoOwner
+	repoName := task.Spec.RepoName
+	issueNumber := task.Spec.IssueNumber
 
 	// Post response comment back to GitHub
 	err = s.ghClient.PostComment(repoOwner, repoName, issueNumber, req.Response)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to post comment to GitHub: %v", err), http.StatusInternalServerError)
+		c.String(http.StatusInternalServerError, "Failed to post comment to GitHub: %v", err)
 		return
 	}
 
@@ -383,22 +359,21 @@ func (s *ListenerServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 	task.Status.State = v1alpha1.StateCompleted
 	uTaskUpdated, err := v1alpha1.ToUnstructured(task)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to serialize updated AgentTask: %v", err), http.StatusInternalServerError)
+		c.String(http.StatusInternalServerError, "Failed to serialize updated AgentTask: %v", err)
 		return
 	}
 
-	_, err = s.dynClient.Resource(agentTaskGVR).Namespace(s.namespace).UpdateStatus(r.Context(), uTaskUpdated, metav1.UpdateOptions{})
+	_, err = s.dynClient.Resource(agentTaskGVR).Namespace(s.namespace).UpdateStatus(c.Request.Context(), uTaskUpdated, metav1.UpdateOptions{})
 	if err != nil {
 		// Try full update if UpdateStatus fails
-		_, err = s.dynClient.Resource(agentTaskGVR).Namespace(s.namespace).Update(r.Context(), uTaskUpdated, metav1.UpdateOptions{})
+		_, err = s.dynClient.Resource(agentTaskGVR).Namespace(s.namespace).Update(c.Request.Context(), uTaskUpdated, metav1.UpdateOptions{})
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to update AgentTask state to Completed: %v", err), http.StatusInternalServerError)
+			c.String(http.StatusInternalServerError, "Failed to update AgentTask state to Completed: %v", err)
 			return
 		}
 	}
 
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("Callback successful, task marked as completed"))
+	c.String(http.StatusOK, "Callback successful, task marked as completed")
 }
 
 func generateRandomHex(n int) string {
@@ -425,4 +400,58 @@ func validateSignature(secret []byte, payload []byte, signatureHeader string) bo
 	expectedMAC := mac.Sum(nil)
 
 	return hmac.Equal(sigBytes, expectedMAC)
+}
+
+type TokenResponse struct {
+	GitHubToken   string `json:"gitHubToken"`
+	CallbackToken string `json:"callbackToken"`
+}
+
+func (s *ListenerServer) handleGenerateTokens(c *gin.Context) {
+	taskID := c.Param("taskID")
+
+	// Fetch AgentTask
+	uTask, err := s.dynClient.Resource(agentTaskGVR).Namespace(s.namespace).Get(c.Request.Context(), taskID, metav1.GetOptions{})
+	if err != nil {
+		c.String(http.StatusNotFound, "AgentTask %s not found", taskID)
+		return
+	}
+
+	task, err := v1alpha1.FromUnstructured(uTask)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Failed to parse AgentTask")
+		return
+	}
+
+	// Retrieve repository details from spec
+	repoOwner := task.Spec.RepoOwner
+	repoName := task.Spec.RepoName
+	if repoOwner == "" || repoName == "" {
+		c.String(http.StatusBadRequest, "Missing repository owner or name in spec")
+		return
+	}
+
+	// Mint GitHub installation token using App private key
+	githubToken, err := s.ghClient.MintInstallationToken(repoOwner, repoName)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Failed to mint github token: %v", err)
+		return
+	}
+
+	// Generate Result Callback Token
+	callbackToken := generateRandomHex(16)
+
+	// Write Result Callback Token to Redis/TokenStore
+	err = s.tokenStore.StoreToken(c.Request.Context(), taskID, callbackToken)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Failed to store callback token: %v", err)
+		return
+	}
+
+	resp := TokenResponse{
+		GitHubToken:   githubToken,
+		CallbackToken: callbackToken,
+	}
+
+	c.JSON(http.StatusOK, resp)
 }

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloud-agent-models-config
+data:
+  model.pr: "google/gemma-4-31b-it"
+  model.general: "google/gemma-4-26b-a4b-it"

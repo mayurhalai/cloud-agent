@@ -1,0 +1,21 @@
+resources:
+  - ../base
+
+labels:
+  - pairs:
+      pool: pi-golang
+
+namePrefix: pi-golang-
+
+images:
+  - name: agent-pi
+    newName: agent-pi-golang
+    newTag: latest
+
+patches:
+  - path: warmpool-template.yaml
+    target:
+      group: extensions.agents.x-k8s.io
+      version: v1alpha1
+      kind: SandboxWarmPool
+      name: sandbox-warmpool

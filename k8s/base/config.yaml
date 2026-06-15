@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloud-agent-config
+data:
+  agent-retry-count: "2"
+  agent-github-name: "site-worker" # Github bot name of the github app
+  agent-github-label: "cloud-agent" # Github label to listen for creating PRs

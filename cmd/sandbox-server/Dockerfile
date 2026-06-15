@@ -14,7 +14,10 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o sandbox-server ./cmd/sandbox-server
 
 # Runtime stage
-FROM scratch
+FROM node:26-trixie-slim
 
 # Copy the compiled binary
-COPY --from=builder /app/sandbox-server /app/sandbox-server
+COPY --from=builder /app/sandbox-server /bin/sandbox-server
+
+ONBUILD EXPOSE 8888
+ONBUILD ENTRYPOINT ["/bin/sandbox-server"]

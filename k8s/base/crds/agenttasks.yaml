@@ -4,6 +4,13 @@ metadata:
   name: agenttasks.cloudagent.mayurhalai.github.com
 spec:
   group: cloudagent.mayurhalai.github.com
+  scope: Namespaced
+  names:
+    plural: agenttasks
+    singular: agenttask
+    kind: AgentTask
+    shortNames:
+      - at
   versions:
     - name: v1alpha1
       served: true
@@ -21,19 +28,36 @@ spec:
                   type: string
                 taskOwner:
                   type: string
-                githubTokenSecretRef:
+                taskOwnerEmail:
                   type: string
-                callbackTokenSecretRef:
+                repoOwner:
+                  type: string
+                repoName:
+                  type: string
+                issueNumber:
+                  type: integer
+                taskType:
                   type: string
             status:
               type: object
               properties:
                 state:
                   type: string
-  scope: Namespaced
-  names:
-    plural: agenttasks
-    singular: agenttask
-    kind: AgentTask
-    shortNames:
-      - at
+                retries:
+                  type: integer
+                sandboxClaimName:
+                  type: string
+                sandboxName:
+                  type: string
+                podName:
+                  type: string
+      additionalPrinterColumns:
+        - name: Status
+          type: string
+          jsonPath: .status.state
+        - name: Sandbox
+          type: string
+          jsonPath: .status.sandboxName
+        - name: Pod
+          type: string
+          jsonPath: .status.podName

@@ -1,0 +1,18 @@
+resources:
+  - ../base
+
+labels:
+  - pairs:
+      pool: pi
+
+
+namePrefix: pi-
+
+patches:
+  - path: warmpool-template.yaml
+    target:
+      group: extensions.agents.x-k8s.io
+      version: v1alpha1
+      kind: SandboxWarmPool
+      name: sandbox-warmpool
+    

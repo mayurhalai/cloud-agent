@@ -30,16 +30,33 @@ spec:
             - name: GITHUB_APP_ID
               valueFrom:
                 secretKeyRef:
-                  name: github-app-secret
+                  name: cloud-agent-secret
                   key: github-app-id
             - name: GITHUB_APP_WEBHOOK_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: github-app-secret
+                  name: cloud-agent-secret
                   key: github-app-webhook-secret
                   optional: true
             - name: GITHUB_APP_PRIVATE_KEY_PATH
               value: /etc/github/private-key.pem
+            - name: REDIS_URL
+              value: redis://redis:6379
+            - name: SYSTEM_AGENT
+              valueFrom:
+                configMapKeyRef:
+                  name: cloud-agent-config
+                  key: system-agent
+            - name: AGENT_LABEL
+              valueFrom:
+                configMapKeyRef:
+                  name: cloud-agent-config
+                  key: agent-github-label
+            - name: AGENT_GITHUB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: cloud-agent-config
+                  key: agent-github-name
           volumeMounts:
             - name: github-app-key
               mountPath: /etc/github
@@ -47,7 +64,7 @@ spec:
       volumes:
         - name: github-app-key
           secret:
-            secretName: github-app-secret
+            secretName: cloud-agent-secret
             items:
               - key: github-app-key
                 path: private-key.pem

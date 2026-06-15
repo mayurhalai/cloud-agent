@@ -1,6 +1,9 @@
 resources:
   - ../base
-  - sandbox-template.yaml
-  - sandbox-warmpool.yaml
+  - plain
+  - golang
 
 namespace: cloud-agent
+
+patches:
+  - path: patch-config.yaml

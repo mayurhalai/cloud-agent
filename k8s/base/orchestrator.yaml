@@ -23,3 +23,9 @@ spec:
             limits:
               memory: "128Mi"
               cpu: "500m"
+          env:
+            - name: AGENT_RETRY_COUNT
+              valueFrom:
+                configMapKeyRef:
+                  name: cloud-agent-config
+                  key: agent-retry-count

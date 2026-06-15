@@ -1,25 +1,27 @@
 package sandbox
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"sync/atomic"
+
+	"github.com/gin-gonic/gin"
 )
 
 // TaskRequest defines the JSON payload accepted by the POST /task endpoint.
 type TaskRequest struct {
-	TaskName          string `json:"taskName"`
-	CallbackURL       string `json:"callbackURL"`
-	CallbackTokenPath string `json:"callbackTokenPath,omitempty"`
-	GitHubTokenPath   string `json:"githubTokenPath,omitempty"`
-	RepoOwner         string `json:"repoOwner"`
-	RepoName          string `json:"repoName"`
-	TaskOwner         string `json:"taskOwner"`
-	TaskOwnerEmail    string `json:"taskOwnerEmail"`
-	WorkspaceDir      string `json:"workspaceDir,omitempty"`
-	TaskType          string `json:"taskType,omitempty"`
-	AgentBinary       string `json:"agentBinary,omitempty"`
-	Prompt            string `json:"prompt"`
+	TaskName       string `json:"taskName"`
+	CallbackToken  string `json:"callbackToken,omitempty"`
+	GitHubToken    string `json:"githubToken,omitempty"`
+	RepoOwner      string `json:"repoOwner"`
+	RepoName       string `json:"repoName"`
+	TaskOwner      string `json:"taskOwner,omitempty"`
+	TaskOwnerEmail string `json:"taskOwnerEmail,omitempty"`
+	TaskType       string `json:"taskType,omitempty"`
+	Prompt         string `json:"prompt"`
+	IssueNumber    int    `json:"issueNumber,omitempty"`
 }
 
 // TaskResponse defines the JSON response returned by the POST /task endpoint.
@@ -28,12 +30,22 @@ type TaskResponse struct {
 	Message string `json:"message"`
 }
 
+var taskAccepted atomic.Bool
+
+// ResetTaskAccepted resets the accepted task state. Used primarily for testing.
+func ResetTaskAccepted() {
+	taskAccepted.Store(false)
+}
+
 // TaskHandler processes task configurations sent to the POST /task endpoint.
-func TaskHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_ = json.NewEncoder(w).Encode(TaskResponse{
+func TaskHandler(c *gin.Context) {
+	if taskAccepted.Load() {
+		c.Status(http.StatusMethodNotAllowed)
+		return
+	}
+
+	if c.Request.Method != http.MethodPost {
+		c.JSON(http.StatusMethodNotAllowed, TaskResponse{
 			Status:  "error",
 			Message: "Method not allowed. Only POST is supported.",
 		})
@@ -41,10 +53,8 @@ func TaskHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req TaskRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(TaskResponse{
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, TaskResponse{
 			Status:  "error",
 			Message: fmt.Sprintf("Failed to decode JSON body: %v", err),
 		})
@@ -56,8 +66,11 @@ func TaskHandler(w http.ResponseWriter, r *http.Request) {
 	if req.TaskName == "" {
 		missing = append(missing, "taskName")
 	}
-	if req.CallbackURL == "" {
-		missing = append(missing, "callbackURL")
+	if req.CallbackToken == "" {
+		missing = append(missing, "callbackToken")
+	}
+	if req.GitHubToken == "" {
+		missing = append(missing, "githubToken")
 	}
 	if req.RepoOwner == "" {
 		missing = append(missing, "repoOwner")
@@ -65,20 +78,23 @@ func TaskHandler(w http.ResponseWriter, r *http.Request) {
 	if req.RepoName == "" {
 		missing = append(missing, "repoName")
 	}
-	if req.TaskOwner == "" {
-		missing = append(missing, "taskOwner")
+	if req.TaskType == "" {
+		missing = append(missing, "taskType")
 	}
-	if req.TaskOwnerEmail == "" {
-		missing = append(missing, "taskOwnerEmail")
+	if req.TaskType == "pr" {
+		if req.TaskOwner == "" {
+			missing = append(missing, "taskOwner")
+		}
+		if req.TaskOwnerEmail == "" {
+			missing = append(missing, "taskOwnerEmail")
+		}
 	}
 	if req.Prompt == "" {
 		missing = append(missing, "prompt")
 	}
 
 	if len(missing) > 0 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(TaskResponse{
+		c.JSON(http.StatusBadRequest, TaskResponse{
 			Status:  "error",
 			Message: fmt.Sprintf("Missing required fields: %v", missing),
 		})
@@ -88,53 +104,50 @@ func TaskHandler(w http.ResponseWriter, r *http.Request) {
 	// Create and execute the runner
 	runner := NewRunner(
 		req.TaskName,
-		req.CallbackURL,
-		req.CallbackTokenPath,
-		req.GitHubTokenPath,
+		req.CallbackToken,
+		req.GitHubToken,
 		req.RepoOwner,
 		req.RepoName,
 		req.TaskOwner,
 		req.TaskOwnerEmail,
-		req.WorkspaceDir,
 		req.TaskType,
-		req.AgentBinary,
 		req.Prompt,
-		nil,
+		req.IssueNumber,
 	)
 
-	if err := runner.Run(r.Context()); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(TaskResponse{
-			Status:  "error",
-			Message: fmt.Sprintf("Task execution failed: %v", err),
-		})
-		return
-	}
+	taskAccepted.Store(true)
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(TaskResponse{
+	go func() {
+		exitCode, err := runner.Run(context.Background())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Task execution failed: %v\n", err)
+			if os.Getenv("TEST_SANDBOX_API_URL") == "" {
+				os.Exit(exitCode)
+			}
+			return
+		}
+		if os.Getenv("TEST_SANDBOX_API_URL") == "" {
+			os.Exit(0)
+		}
+	}()
+
+	c.JSON(http.StatusOK, TaskResponse{
 		Status:  "success",
-		Message: "Task completed successfully",
+		Message: "Task started successfully",
 	})
 }
 
 // HealthCheckHandler handles health check requests to the GET /health endpoint.
-func HealthCheckHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_ = json.NewEncoder(w).Encode(TaskResponse{
+func HealthCheckHandler(c *gin.Context) {
+	if c.Request.Method != http.MethodGet {
+		c.JSON(http.StatusMethodNotAllowed, TaskResponse{
 			Status:  "error",
 			Message: "Method not allowed. Only GET is supported.",
 		})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(TaskResponse{
+	c.JSON(http.StatusOK, TaskResponse{
 		Status:  "success",
 		Message: "Health check success",
 	})

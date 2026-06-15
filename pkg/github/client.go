@@ -1,23 +1,33 @@
 package github
 
 import (
+	"context"
 	"fmt"
 	"sync"
 )
+
+type IssueComment struct {
+	Author string
+	Body   string
+}
 
 type Client interface {
 	PostComment(owner, repo string, issueNumber int, body string) error
 	GetFile(owner, repo, path string) ([]byte, error)
 	MintInstallationToken(owner, repo string) (string, error)
+	GetIssueComments(ctx context.Context, owner, repo string, issueNumber int) ([]*IssueComment, bool, error)
 }
 
 type MockClient struct {
-	mu             sync.Mutex
-	Comments       []MockComment
-	Files          map[string]map[string]map[string][]byte // owner -> repo -> path -> content
-	MintedToken    string
-	MintedTokenErr error
-	GetFileErr     error
+	mu               sync.Mutex
+	Comments         []MockComment
+	Files            map[string]map[string]map[string][]byte // owner -> repo -> path -> content
+	MintedToken      string
+	MintedTokenErr   error
+	GetFileErr       error
+	IssueComments    map[int][]*IssueComment
+	IssueCommentsErr error
+	HasMoreComments  bool
 }
 
 type MockComment struct {
@@ -102,4 +112,27 @@ func (m *MockClient) SetMintedToken(token string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.MintedToken = token
+}
+
+func (m *MockClient) GetIssueComments(ctx context.Context, owner, repo string, issueNumber int) ([]*IssueComment, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.IssueCommentsErr != nil {
+		return nil, false, m.IssueCommentsErr
+	}
+	comments, ok := m.IssueComments[issueNumber]
+	if !ok {
+		return nil, false, nil
+	}
+	return comments, m.HasMoreComments, nil
+}
+
+func (m *MockClient) SetIssueComments(issueNumber int, comments []*IssueComment, hasMore bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.IssueComments == nil {
+		m.IssueComments = make(map[int][]*IssueComment)
+	}
+	m.IssueComments[issueNumber] = comments
+	m.HasMoreComments = hasMore
 }

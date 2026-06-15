@@ -13,13 +13,24 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 # Create namespace
 kubectl create namespace cloud-agent
 
+# Install sandbox router
+AGENT_SANDBOX_REPO_LOCATION="../../kubernetes-sigs/agent-sandbox" # Location where https://github.com/kubernetes-sigs/agent-sandbox is cloned
+pushd "${AGENT_SANDBOX_REPO_LOCATION}/clients/python/agentic-sandbox-client/sandbox-router"
+SANDBOX_ROUTER_IMAGE="sandbox-router:latest"
+docker build -t $SANDBOX_ROUTER_IMAGE .
+kind load docker-image $SANDBOX_ROUTER_IMAGE --name desktop
+# sed -i "s|\${ROUTER_IMAGE}|${SANDBOX_ROUTER_IMAGE}|g" sandbox_router.yaml
+kubectl apply -n cloud-agent -f sandbox_router.yaml
+popd
+
 # Create secret
-kubectl apply -f /Users/mayurhalai/repos/crap/secrets/github-app-secret.yaml -n cloud-agent
+kubectl apply -f /Users/mayurhalai/repos/crap/secrets/cloud-agent-secret.yaml -n cloud-agent
 
 # Load images
 kind load docker-image webhook-listener:latest --name desktop
 kind load docker-image orchestrator:latest --name desktop
 kind load docker-image agent-pi:latest --name desktop
+kind load docker-image agent-pi-golang:latest --name desktop
 
 # Deploy pi agent sandbox
 kubectl apply -k k8s/pi

@@ -1,24 +1,14 @@
-FROM sandbox-server AS tools
+FROM sandbox-server
 
-FROM node:26-trixie-slim
+# Install tools and agent
+COPY --chmod=744 sandboxes/install /tmp/install
+RUN /tmp/install tools pi && rm -rf /tmp/install
 
-# Install basic tools
-RUN apt-get update && \
-    apt-get install -y \
-    curl \
-    wget \
-    git \
-    && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install pi agent
-RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent && \
-    npm cache clean --force
+# Set user
+USER 1000:1000
 
 # Enter code directory and run agent by default
-WORKDIR /workspace
+WORKDIR /home/node
 
-# Mendatory to enable sandbox communication to orchestrator
-COPY --from=tools /app/sandbox-server /bin/sandbox-server
-EXPOSE 8888
-ENTRYPOINT ["/bin/sandbox-server"]
+# Set agent binary
+ENV AGENT_BIN=pi
