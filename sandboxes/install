@@ -1,0 +1,64 @@
+#!/bin/bash
+
+set -e
+
+# Function to display usage
+usage() {
+    echo "Usage: $0 [tools] [pi] [opencode] [golang] ..."
+    echo "  tools    - installs basic tools"
+    echo "  pi       - installs pi agent"
+    echo "  opencode - installs opencode agent"
+    echo "  golang   - installs Golang"
+    exit 1
+}
+
+if [ $# -eq 0 ]; then
+    usage
+fi
+
+install_tools() {
+    echo "Installing basic tools..."
+    apt-get update
+    apt-get install -y --no-install-recommends bash ca-certificates ripgrep curl wget git make
+    rm -rf /var/lib/apt/lists/*
+}
+
+install_pi() {
+    echo "Installing pi agent..."
+    npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+    npm cache clean --force
+}
+
+install_opencode() {
+    echo "Installing opencode agent..."
+    npm install -g opencode-ai
+    npm cache clean --force
+}
+
+install_golang() {
+    echo "Installing Golang..."
+    curl -fsSL "https://go.dev/dl/go1.26.4.linux-amd64.tar.gz" -o go.tar.gz
+    tar -C /usr/local -xzf go.tar.gz
+    rm go.tar.gz
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        tools)
+            install_tools
+            ;;
+        pi)
+            install_pi
+            ;;
+        opencode)
+            install_opencode
+            ;;
+        golang)
+            install_golang
+            ;;
+        *)
+            echo "Error: Unknown argument '$arg'"
+            usage
+            ;;
+    esac
+done

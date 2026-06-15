@@ -30,6 +30,7 @@ kubectl apply -f /Users/mayurhalai/repos/crap/secrets/cloud-agent-secret.yaml -n
 kind load docker-image webhook-listener:latest --name desktop
 kind load docker-image orchestrator:latest --name desktop
 kind load docker-image agent-pi:latest --name desktop
+kind load docker-image agent-pi-golang:latest --name desktop
 
 # Deploy pi agent sandbox
 kubectl apply -k k8s/pi

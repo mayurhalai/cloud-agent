@@ -28,7 +28,9 @@ clean:
 	@echo "Cleaning up..."
 	rm -rf bin
 
-containers: clean container-sandbox-server container-webhook-listener container-orchestrator container-agent-pi container-agent-opencode
+containers: containers-pi
+containers-pi: clean container-sandbox-server container-webhook-listener container-orchestrator container-agent-pi container-agent-pi-golang
+containers-opencode: clean container-sandbox-server container-webhook-listener container-orchestrator container-agent-opencode container-agent-opencode-golang
 
 container-sandbox-server:
 	@docker build -t sandbox-server -f cmd/sandbox-server/Dockerfile .
@@ -48,3 +50,11 @@ container-agent-pi:
 container-agent-opencode:
 	@docker build -t agent-opencode -f sandboxes/agents/opencode/Dockerfile .
 	@kind load docker-image agent-opencode:latest --name desktop
+
+container-agent-pi-golang:
+	@docker build -t agent-pi-golang -f sandboxes/golang/pi/Dockerfile .
+	@kind load docker-image agent-pi-golang:latest --name desktop
+
+container-agent-opencode-golang:
+	@docker build -t agent-opencode-golang -f sandboxes/golang/opencode/Dockerfile .
+	@kind load docker-image agent-opencode-golang:latest --name desktop

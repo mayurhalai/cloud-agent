@@ -1,7 +1,7 @@
 apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxTemplate
 metadata:
-  name: pi-sandbox-template
+  name: sandbox-template
 spec:
   podTemplate:
     spec:

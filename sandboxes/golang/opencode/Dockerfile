@@ -2,7 +2,10 @@ FROM sandbox-server
 
 # Install tools and agent
 COPY --chmod=744 sandboxes/install /tmp/install
-RUN /tmp/install tools pi && rm -rf /tmp/install
+RUN /tmp/install tools opencode golang && rm -rf /tmp/install
+
+# Golang directory needs to be added to path
+ENV PATH="$PATH:/usr/local/go/bin"
 
 # Set user
 USER 1000:1000
@@ -11,4 +14,4 @@ USER 1000:1000
 WORKDIR /home/node
 
 # Set agent binary
-ENV AGENT_BIN=pi
+ENV AGENT_BIN=opencode

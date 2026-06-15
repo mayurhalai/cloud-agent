@@ -1,7 +1,7 @@
 resources:
   - ../base
-  - sandbox-template.yaml
-  - sandbox-warmpool.yaml
+  - plain
+  - golang
 
 namespace: cloud-agent
 
