@@ -332,3 +332,111 @@ func TestHandleWebhook_Labeled(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleGenerateTokens_BasicAuth(t *testing.T) {
+	scheme := runtime.NewScheme()
+	task := &v1alpha1.AgentTask{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "cloudagent.mayurhalai.github.com/v1alpha1",
+			Kind:       "AgentTask",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-task",
+			Namespace: "test-namespace",
+		},
+		Spec: v1alpha1.AgentTaskSpec{
+			RepoOwner: "test-owner",
+			RepoName:  "test-repo",
+		},
+	}
+	uTask, err := v1alpha1.ToUnstructured(task)
+	if err != nil {
+		t.Fatalf("failed to convert task to unstructured: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		setupEnv       func()
+		setupRequest   func(req *http.Request)
+		expectedStatus int
+	}{
+		{
+			name: "No basic auth configured, no credentials supplied - Success",
+			setupEnv: func() {
+				// Ensure environment is empty
+			},
+			setupRequest: func(req *http.Request) {
+				// No credentials
+			},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name: "Basic auth configured, correct credentials supplied - Success",
+			setupEnv: func() {
+				t.Setenv("TOKENS_AUTH_SECRET", "super-secret")
+			},
+			setupRequest: func(req *http.Request) {
+				req.SetBasicAuth("sandbox-orchestrator", "super-secret")
+			},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name: "Basic auth configured, wrong password - Unauthorized",
+			setupEnv: func() {
+				t.Setenv("TOKENS_AUTH_SECRET", "super-secret")
+			},
+			setupRequest: func(req *http.Request) {
+				req.SetBasicAuth("sandbox-orchestrator", "wrong-secret")
+			},
+			expectedStatus: http.StatusUnauthorized,
+		},
+		{
+			name: "Basic auth configured, wrong username - Unauthorized",
+			setupEnv: func() {
+				t.Setenv("TOKENS_AUTH_SECRET", "super-secret")
+			},
+			setupRequest: func(req *http.Request) {
+				req.SetBasicAuth("wrong-user", "super-secret")
+			},
+			expectedStatus: http.StatusUnauthorized,
+		},
+		{
+			name: "Basic auth configured, missing credentials - Unauthorized",
+			setupEnv: func() {
+				t.Setenv("TOKENS_AUTH_SECRET", "super-secret")
+			},
+			setupRequest: func(req *http.Request) {
+				// No credentials
+			},
+			expectedStatus: http.StatusUnauthorized,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Clean/set env for this test case
+			t.Setenv("TOKENS_AUTH_SECRET", "")
+			tt.setupEnv()
+
+			k8sClient := k8sfake.NewSimpleClientset()
+			gvrToListKind := map[schema.GroupVersionResource]string{
+				agentTaskGVR: "AgentTaskList",
+			}
+			dynClient := dynfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind, uTask)
+			ghClient := &github.MockClient{}
+			tokenStore := NewInMemoryTokenStore()
+
+			server := NewListenerServer(k8sClient, dynClient, ghClient, "test-namespace", nil, tokenStore)
+
+			req := httptest.NewRequest(http.MethodPost, "/task/test-task/tokens", nil)
+			tt.setupRequest(req)
+
+			w := httptest.NewRecorder()
+			server.ServeHTTP(w, req)
+
+			if w.Code != tt.expectedStatus {
+				t.Errorf("expected status %d, got %d. Body: %s", tt.expectedStatus, w.Code, w.Body.String())
+			}
+		})
+	}
+}

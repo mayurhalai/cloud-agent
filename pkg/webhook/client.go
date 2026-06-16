@@ -7,15 +7,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 )
 
 type Client struct {
-	url string
+	url          string
+	authUsername string
+	authPassword string
 }
 
 func NewClient(baseUrl string) *Client {
 	return &Client{
-		url: baseUrl,
+		url:          baseUrl,
+		authUsername: "sandbox-orchestrator",
+		authPassword: os.Getenv("TOKENS_AUTH_SECRET"),
 	}
 }
 
@@ -25,6 +30,10 @@ func (c *Client) GenerateTokens(ctx context.Context, taskID string) (*TokenRespo
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token request: %w", err)
+	}
+
+	if c.authPassword != "" {
+		req.SetBasicAuth(c.authUsername, c.authPassword)
 	}
 
 	resp, err := c.do(req)
