@@ -38,6 +38,11 @@ spec:
                   name: cloud-agent-secret
                   key: github-app-webhook-secret
                   optional: true
+            - name: TOKENS_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: cloud-agent-secret
+                  key: tokens-auth-secret
             - name: GITHUB_APP_PRIVATE_KEY_PATH
               value: /etc/github/private-key.pem
             - name: REDIS_URL

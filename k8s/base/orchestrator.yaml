@@ -29,3 +29,8 @@ spec:
                 configMapKeyRef:
                   name: cloud-agent-config
                   key: agent-retry-count
+            - name: TOKENS_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: cloud-agent-secret
+                  key: tokens-auth-secret

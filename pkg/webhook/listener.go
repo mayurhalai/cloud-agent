@@ -29,24 +29,27 @@ var agentTaskGVR = schema.GroupVersionResource{
 }
 
 type ListenerServer struct {
-	k8sClient     kubernetes.Interface
-	dynClient     dynamic.Interface
-	ghClient      github.Client
-	namespace     string
-	webhookSecret []byte
-	tokenStore    TokenStore
+	k8sClient        kubernetes.Interface
+	dynClient        dynamic.Interface
+	ghClient         github.Client
+	namespace        string
+	webhookSecret    []byte
+	tokenStore       TokenStore
+	tokensAuthSecret string
 }
 
 func NewListenerServer(k8sClient kubernetes.Interface, dynClient dynamic.Interface, ghClient github.Client, namespace string, webhookSecret []byte, tokenStore TokenStore) *gin.Engine {
 	s := &ListenerServer{
-		k8sClient:     k8sClient,
-		dynClient:     dynClient,
-		ghClient:      ghClient,
-		namespace:     namespace,
-		webhookSecret: webhookSecret,
-		tokenStore:    tokenStore,
+		k8sClient:        k8sClient,
+		dynClient:        dynClient,
+		ghClient:         ghClient,
+		namespace:        namespace,
+		webhookSecret:    webhookSecret,
+		tokenStore:       tokenStore,
+		tokensAuthSecret: os.Getenv("TOKENS_AUTH_SECRET"),
 	}
 
+	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 	r.POST("/webhook", s.handleWebhook)
 	r.POST("/callback", s.handleCallback)
@@ -408,6 +411,15 @@ type TokenResponse struct {
 }
 
 func (s *ListenerServer) handleGenerateTokens(c *gin.Context) {
+	if s.tokensAuthSecret != "" {
+		username, password, ok := c.Request.BasicAuth()
+		if !ok || username != "sandbox-orchestrator" || password != s.tokensAuthSecret {
+			c.Header("WWW-Authenticate", `Basic realm="tokens"`)
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+	}
+
 	taskID := c.Param("taskID")
 
 	// Fetch AgentTask
