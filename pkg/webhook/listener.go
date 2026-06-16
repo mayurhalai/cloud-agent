@@ -47,6 +47,7 @@ func NewListenerServer(k8sClient kubernetes.Interface, dynClient dynamic.Interfa
 		tokenStore:    tokenStore,
 	}
 
+	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 	r.POST("/webhook", s.handleWebhook)
 	r.POST("/callback", s.handleCallback)
