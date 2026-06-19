@@ -83,7 +83,41 @@ make containers-pi
 make containers-opencode
 ```
 
+### GitHub Application
+
+Create github application with following
+
+Permissions:
+- Repository permissions:
+   - Content (Read and write)
+   - Issues (Read and write)
+   - Metadata (Read-only)
+   - Pull requests (Read and write)
+   - Workflows (Read and write) (Only needed if you intend to update github workflow files using agent)
+- Account permissions:
+   - Email addresses (Read-only)
+
+Subscribe to events:
+- Issue comments
+- Issues
+
 ### Kubernetes Cluster Deployment
+
+Prepare `cloud-agent-secret.yaml` as following:
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloud-agent-secret
+type: Opaque
+stringData:
+  github-app-id: "<GitHub Application id>"
+  github-app-webhook-secret: "<Webhook secret you set on GitHub Application>"
+  github-app-key: |
+    <GitHub Application private key>
+  GEMINI_API_KEY: "<Gemini api key>"
+  tokens-auth-secret: "<random logn password>"
+```
 
 You can deploy the resources to a local Kind cluster using the provided installation script and Kustomization manifests:
 

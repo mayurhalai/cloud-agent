@@ -24,7 +24,7 @@ kubectl apply -n cloud-agent -f sandbox_router.yaml
 popd
 
 # Create secret
-kubectl apply -f /Users/mayurhalai/repos/crap/secrets/cloud-agent-secret.yaml -n cloud-agent
+kubectl apply -f /path/to/cloud-agent-secret.yaml -n cloud-agent
 
 # Load images
 kind load docker-image webhook-listener:latest --name desktop
