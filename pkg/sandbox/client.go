@@ -94,7 +94,7 @@ func (c *Client) CreateSandbox(ctx context.Context, template, namespace string) 
 	}
 
 	// map sandbox-template to sandbox-warmpool
-	warmpool := strings.TrimRight(template, "-template")
+	warmpool := strings.TrimSuffix(template, "-template")
 	warmpool = warmpool + "-warmpool"
 
 	claim := &extv1beta1.SandboxClaim{
