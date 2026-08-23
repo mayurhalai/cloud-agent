@@ -16,6 +16,6 @@ patches:
   - path: warmpool-template.yaml
     target:
       group: extensions.agents.x-k8s.io
-      version: v1alpha1
+      version: v1beta1
       kind: SandboxWarmPool
       name: sandbox-warmpool

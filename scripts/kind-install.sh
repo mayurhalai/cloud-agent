@@ -2,13 +2,10 @@
 
 # Replace "vX.Y.Z" with a specific version tag (e.g., "v0.1.0") from
 # https://github.com/kubernetes-sigs/agent-sandbox/releases
-export VERSION="v0.4.6"
+export VERSION="v0.5.6"
 
-# To install only the core components:
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
-
-# To install the extensions components:
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
+# To install sandbox with extensions:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox-with-extensions.yaml
 
 # Create namespace
 kubectl create namespace cloud-agent

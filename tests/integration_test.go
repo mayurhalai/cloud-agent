@@ -33,10 +33,10 @@ import (
 	dynfake "k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
-	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	agentsv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	agentsfake "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
 	extensionsfake "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/fake"
-	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 var agentTaskGVR = schema.GroupVersionResource{
@@ -87,7 +87,7 @@ func setupTestEnv(t *testing.T, secret []byte) *testEnv {
 
 	extensionsClient.PrependReactor("create", "sandboxclaims", func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
 		createAction := action.(clienttesting.CreateAction)
-		claim := createAction.GetObject().(*extv1alpha1.SandboxClaim)
+		claim := createAction.GetObject().(*extv1beta1.SandboxClaim)
 		if claim.Name == "" && claim.GenerateName != "" {
 			claim.Name = claim.GenerateName + generateRandomSuffix()
 		}
@@ -154,8 +154,8 @@ func setupTestEnv(t *testing.T, secret []byte) *testEnv {
 
 	// Sandbox Client
 	sbHelper := &sandbox.K8sHelper{
-		AgentsClient:     agentsClient.AgentsV1alpha1(),
-		ExtensionsClient: extensionsClient.ExtensionsV1alpha1(),
+		AgentsClient:     agentsClient.AgentsV1beta1(),
+		ExtensionsClient: extensionsClient.ExtensionsV1beta1(),
 		DynamicClient:    dynClient,
 		CoreClient:       k8sClient.CoreV1(),
 		Log:              testr.New(t),
@@ -192,25 +192,25 @@ func runMicroReconciler(ctx context.Context, namespace string, extensionsClient 
 			return
 		case <-ticker.C:
 			// 1. Process SandboxClaims
-			claims, err := extensionsClient.ExtensionsV1alpha1().SandboxClaims(namespace).List(ctx, metav1.ListOptions{})
+			claims, err := extensionsClient.ExtensionsV1beta1().SandboxClaims(namespace).List(ctx, metav1.ListOptions{})
 			if err == nil {
 				for _, claim := range claims.Items {
 					if claim.Status.SandboxStatus.Name == "" {
 						claim.Status.SandboxStatus.Name = "sb-" + claim.Name
-						_, _ = extensionsClient.ExtensionsV1alpha1().SandboxClaims(namespace).UpdateStatus(ctx, &claim, metav1.UpdateOptions{})
+						_, _ = extensionsClient.ExtensionsV1beta1().SandboxClaims(namespace).UpdateStatus(ctx, &claim, metav1.UpdateOptions{})
 					}
 				}
 			}
 
 			// 2. Process Sandboxes
-			claims, err = extensionsClient.ExtensionsV1alpha1().SandboxClaims(namespace).List(ctx, metav1.ListOptions{})
+			claims, err = extensionsClient.ExtensionsV1beta1().SandboxClaims(namespace).List(ctx, metav1.ListOptions{})
 			if err == nil {
 				for _, claim := range claims.Items {
 					sbName := claim.Status.SandboxStatus.Name
 					if sbName != "" {
-						_, err := agentsClient.AgentsV1alpha1().Sandboxes(namespace).Get(ctx, sbName, metav1.GetOptions{})
+						_, err := agentsClient.AgentsV1beta1().Sandboxes(namespace).Get(ctx, sbName, metav1.GetOptions{})
 						if err != nil { // Create if it doesn't exist
-							sbObj := &agentsv1alpha1.Sandbox{
+							sbObj := &agentsv1beta1.Sandbox{
 								ObjectMeta: metav1.ObjectMeta{
 									Name:      sbName,
 									Namespace: namespace,
@@ -218,7 +218,7 @@ func runMicroReconciler(ctx context.Context, namespace string, extensionsClient 
 										"agents.x-k8s.io/pod-name": "pod-" + sbName,
 									},
 								},
-								Status: agentsv1alpha1.SandboxStatus{
+								Status: agentsv1beta1.SandboxStatus{
 									Conditions: []metav1.Condition{
 										{
 											Type:   "Ready",
@@ -228,14 +228,14 @@ func runMicroReconciler(ctx context.Context, namespace string, extensionsClient 
 									PodIPs: []string{"127.0.0.1"},
 								},
 							}
-							_, _ = agentsClient.AgentsV1alpha1().Sandboxes(namespace).Create(ctx, sbObj, metav1.CreateOptions{})
+							_, _ = agentsClient.AgentsV1beta1().Sandboxes(namespace).Create(ctx, sbObj, metav1.CreateOptions{})
 						}
 					}
 				}
 			}
 
 			// 3. Process Pods
-			sbs, err := agentsClient.AgentsV1alpha1().Sandboxes(namespace).List(ctx, metav1.ListOptions{})
+			sbs, err := agentsClient.AgentsV1beta1().Sandboxes(namespace).List(ctx, metav1.ListOptions{})
 			if err == nil {
 				for _, sbObj := range sbs.Items {
 					podName := sbObj.Annotations["agents.x-k8s.io/pod-name"]
