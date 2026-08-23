@@ -20,18 +20,18 @@ import (
 	"k8s.io/client-go/rest"
 
 	agentsclientset "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned"
-	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1alpha1"
+	agentsv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1beta1"
 	extensionsclientset "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1alpha1"
-	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1beta1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 const PodNameAnnotation = "agents.x-k8s.io/pod-name"
 
 // K8sHelper encapsulates all Kubernetes API interactions for sandbox lifecycle management.
 type K8sHelper struct {
-	AgentsClient     agentsv1alpha1.AgentsV1alpha1Interface
-	ExtensionsClient extensionsv1alpha1.ExtensionsV1alpha1Interface
+	AgentsClient     agentsv1beta1.AgentsV1beta1Interface
+	ExtensionsClient extensionsv1beta1.ExtensionsV1beta1Interface
 	DynamicClient    dynamic.Interface
 	CoreClient       corev1client.CoreV1Interface
 	Log              logr.Logger
@@ -60,8 +60,8 @@ func NewK8sHelper(config *rest.Config, log logr.Logger) (*K8sHelper, error) {
 	}
 
 	return &K8sHelper{
-		AgentsClient:     agentsCS.AgentsV1alpha1(),
-		ExtensionsClient: extensionsCS.ExtensionsV1alpha1(),
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
 		DynamicClient:    dynClient,
 		CoreClient:       coreCS.CoreV1(),
 		Log:              log,
@@ -93,14 +93,18 @@ func (c *Client) CreateSandbox(ctx context.Context, template, namespace string) 
 		namespace = "default"
 	}
 
-	claim := &extv1alpha1.SandboxClaim{
+	// map sandbox-template to sandbox-warmpool
+	warmpool := strings.TrimSuffix(template, "-template")
+	warmpool = warmpool + "-warmpool"
+
+	claim := &extv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "sandbox-claim-",
 			Namespace:    namespace,
 		},
-		Spec: extv1alpha1.SandboxClaimSpec{
-			TemplateRef: extv1alpha1.SandboxTemplateRef{
-				Name: template,
+		Spec: extv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extv1beta1.SandboxWarmPoolRef{
+				Name: warmpool,
 			},
 		},
 	}
